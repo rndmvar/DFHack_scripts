@@ -26,24 +26,20 @@ lookup_hist_fig = lambda{ |hist_fig_id|
         df.world.history.figures.each_with_index do |figure, i|
             if figure.id == hist_fig_id
                 historical_fig_dict[hist_fig_id] = figure
+                break
             end
         end
     end
+    return historical_fig_dict[hist_fig_id]
 }
 
-# This will return the english version of the word IDs given in the passed array (used here for getting the last name, but could be for anything)
-lookup_words = lambda{ |words|
-    # We're adding this all together into a single string
-    return_string = ""
-    words.each_with_index do |word_int, i|
-        # Skip non-entries
-        if word_int == -1
-            next
-        end
-        # Add the found word
-        return_string += df.world.raws.language.words[word_int].word
+race_dict = {}
+
+lookup_race = lambda{ |race_id|
+    if not race_dict[race_id]
+        race_dict[race_id] = df.world.raws.creatures.all[race_id]
     end
-    return return_string
+    return race_dict[race_id]
 }
 
 # Set needs values to highest fulfillment level.  Will cause the unit to become extremely "focused"
@@ -69,12 +65,16 @@ df.world.units.active.each_with_index do |unit, i|
     if unit.flags1.dead
         next
     end
-    soul = unit.status.souls[0]
+    soul = unit.status.current_soul
+    # Some units which are not marked as dead may not have a soul
+    if soul == nil
+        next
+    end
+    personality = soul.personality
     # Skip current player race, as this isn't for cheating
     if soul.race == player_race
         next
     end
-    personality = soul.personality
     # Skip units that have all of their needs met
     if not personality.flags.has_unmet_needs
         next
@@ -91,29 +91,25 @@ df.world.units.active.each_with_index do |unit, i|
         end
         deity_name_str = ""
         if need.deity_id != -1
-            # Search for the Diety in the historical figures list
-            if not historical_fig_dict[need.deity_id]
-                lookup_hist_fig[need.deity_id]
-            end
             # Get the Diety name
-            deity_name_obj = historical_fig_dict[need.deity_id].name
+            deity_name_obj = lookup_hist_fig[need.deity_id].name
             # Format the Diety's full name for printing
-            deity_name_str = (deity_name_obj.first_name + " " + lookup_words[deity_name_obj.words]).gsub(/\w+/, &:capitalize)
+            deity_name_str = ", #{deity_name_obj}".gsub(/\w+/, &:capitalize)
         end
         # Add this need to the print string.  Focus is best at 400, and worst below 0.  Decay is best at 1, and worst at 10.
-        needs_str += need.id.inspect + "=" + need.focus_level.inspect + " focus," + need.need_level.inspect + " decay," + deity_name_str + "|"
+        needs_str += "%21s: %6d focus, %2d decay%s\n" % [need.id.inspect, need.focus_level, need.need_level, deity_name_str]
     end
     # Store the overall focus levels as float so that a fractional value can be examined later
     undistracted_focus = personality.undistracted_focus * 1.0
     current_focus = personality.current_focus * 1.0
-    # Set a default distraction value in the event that current focus is zero ( undistracted focus is the number of needs multiplied by four )
-    distraction_level = (undistracted_focus / 4.0)
-    if personality.current_focus != 0
-        # Distraction level of 1.00-1.99 is "distracted"(yellow) and 2.0-?.?? is "Distracted!"(red) on the UI
-        distraction_level = (undistracted_focus / current_focus)
+    # avoid divide by zero issues
+    if current_focus < 0.1
+        current_focus += 0.1
     end
-    # Get the species name of the unit for printing
-    race_name = df.world.raws.creatures.all[soul.race].name[0].gsub(/\w+/, &:capitalize)
+    # Distraction level of 1.00-1.99 is "distracted"(yellow) and 2.0-?.?? is "Distracted!"(red) on the UI
+    distraction_level = (undistracted_focus / current_focus)
+    # Get the species (singular version) name of the unit for printing
+    race_name = lookup_race[soul.race].name[0].gsub(/\w+/, &:capitalize)
     civilization = "Foreigner"
     # Locals are animal units born on the map as tame or trained to tame status while a child.  They are also the sentient members of the fortress.
     if player_civ == personality.civ_id
@@ -122,11 +118,11 @@ df.world.units.active.each_with_index do |unit, i|
     name = "Nameless"
     if unit.name.has_name
         # Get the name of the unit for printing
-        name = (unit.name.first_name + " " + lookup_words[unit.name.words]).gsub(/\w+/, &:capitalize)
+        name = "#{unit.name}".gsub(/\w+/, &:capitalize)
     end
     # Not sure if a distraction level of 0.25 is too high or low to trigger this on, but anything at 1.0 or over will definitely need to be addressed by this script.
     if distraction_level >= 0.25
-        puts("^" + civilization + ", " + race_name + ", " + name + "|Stress:" + personality.stress_level.inspect + "|Distraction:#{format("%.2f", distraction_level)}|" + needs_str )
+        puts( "%s, %s, %s\n  Stress: %12d\n  Distraction: %5.2f\n%s\n" % [civilization, race_name, name, personality.stress_level, distraction_level, needs_str] )
         fix_distraction[personality, needs]
     end
 end
