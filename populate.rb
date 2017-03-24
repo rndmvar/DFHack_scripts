@@ -20,8 +20,8 @@ $script_args << '-h' if $script_args.empty?
 arg_parse = OptionParser.new do |opts|
     opts.default_argv = $script_args # Ruby plugin for Dwarf Fortress does not populate ARGV natively
     opts.banner = "Usage: populate -s CREATURE [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] [-d] [-v]"
-    options[:regions] = 65 # Using observed values from one game, may not be the best default values, but it's the default for now
-    options[:locations] = 65
+    options[:regions] = 0
+    options[:locations] = 0
     options[:display] = false
     options[:verbose] = false
     options[:existing] = false
@@ -364,7 +364,7 @@ df.world.populations.each_with_index do |local_population, index|
         puts('[%3d, %3d] Repopulated with %d %s. [old: %d, new: %d]' % [x, y, options[:increment], creature_name, old_count, local_population.quantity])
     end
 end
-puts('%d local population(s) modified.' % [boosted_pops]) if incremented_pops > 0
+puts('%d local population(s) modified.' % [incremented_pops]) if incremented_pops > 0
 
 boosted_pops = 0
 world_pop_by_region = {}
