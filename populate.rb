@@ -356,7 +356,7 @@ df.world.populations.each_with_index do |local_population, index|
     dead_pop = ( local_population.flags.extinct or local_population.flags.already_removed or local_population.flags.unk3 )
     if options[:increment] and not dead_pop
         old_count = local_population.quantity
-        local_population.quantity += options[:boost]
+        local_population.quantity += options[:increment]
         # Not sure if quantity2 is linked to quantity, so we'll set it's value, rather than try to raise it.
         # Suspect it may be linked as all values of quantity2 that I've observed have been equal to quantity(1)
         local_population.quantity2 = local_population.quantity
