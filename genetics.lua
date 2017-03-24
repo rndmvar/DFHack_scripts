@@ -103,8 +103,8 @@ end
 -- get the eldest of two units presented
 -- used solely for determining which unit would be best suited as a surrogate father
 local function get_eldest(one, two)
-    local one_birth = float_date( one.relations.birth_year, one.relations.birth_time )
-    local two_birth = float_date( two.relations.birth_year, two.relations.birth_time )
+    local one_birth = float_date( one.birth_year, one.birth_time )
+    local two_birth = float_date( two.birth_year, two.birth_time )
     if one_birth > two_birth then
         return one
     else
@@ -265,9 +265,9 @@ local function get_results(dominant_value, caste_range)
             below_percent = below_percent + adjust.ranges[i]
         end
     end
-    local low = dominant_value[0] - ( ( dominant_value[0] - lowest ) * below_percent )
-    local high = dominant_value[0] + ( ( highest - dominant_value[0] ) * above_percent )
-    return { [0] = math.floor(math.random(low, high)), adjust.crit_miss, adjust.crit_hit, adjust.mutated }
+    local low = math.floor( dominant_value[0] - ( ( dominant_value[0] - lowest ) * below_percent ) )
+    local high = math.floor( dominant_value[0] + ( ( highest - dominant_value[0] ) * above_percent ) )
+    return { [0] = math.random(low, high), adjust.crit_miss, adjust.crit_hit, adjust.mutated }
 end
 
 -- apply percentage modifiers to each dominant gene based on how far the value is from average
@@ -332,7 +332,7 @@ local surrogate_fathers = {}
 
 -- Filter units before doing anything else
 for i, unit in pairs(df.global.world.units.all) do
-    local birth_date = float_date( unit.relations.birth_year, unit.relations.birth_time )
+    local birth_date = float_date( unit.birth_year, unit.birth_time )
     local race = creatures.all[unit.race]
     local caste = race.caste[unit.caste]
     local creature_id = race.creature_id
@@ -349,13 +349,13 @@ for i, unit in pairs(df.global.world.units.all) do
         end
         if ( birth_date >= filter_date ) and ( creature == creature_id or not creature ) and ( caste_arg == caste_id or not caste_arg ) then
             -- As units can arrive on the map pregnant, it is far more typical for the unit to have a mother, but no father, rather than to be missing both
-            if unit.relations.mother_id ~= -1 and df.unit.find(unit.relations.mother_id) and not df.unit.find(unit.relations.mother_id).flags1.dead then
+            if unit.relationship_ids[df.unit_relationship_type.Mother] ~= -1 and df.unit.find(unit.relationship_ids[df.unit_relationship_type.Mother]) and not df.unit.find(unit.relationship_ids[df.unit_relationship_type.Mother]).flags1.dead then
                 table.insert(units, unit)
             else
                 local name = unit.name.has_name and dfhack.TranslateName(unit.name) or 'Nameless'
                 local race_name = titleize(race.name[0])
                 local civilization = ( unit.civ_id == dwarf_civ ) and 'Local' or 'Foreigner'
-                if unit.relations.father_id ~= -1 and df.unit.find(unit.relations.father_id) and not df.unit.find(unit.relations.father_id).flags1.dead then
+                if unit.relationship_ids[df.unit_relationship_type.Father] ~= -1 and df.unit.find(unit.relationship_ids[df.unit_relationship_type.Father]) and not df.unit.find(unit.relationship_ids[df.unit_relationship_type.Father]).flags1.dead then
                     print(('%s, %s, %s born on %.2f, has no mother on the map, but does have their father on the map.'):format(civilization, race_name, name, birth_date))
                 else
                     print(('%s, %s, %s born on %.2f, has no mother or father, or they are not on the map.'):format(civilization, race_name, name, birth_date))
@@ -375,13 +375,13 @@ for i, unit in pairs(units) do
     local name = unit.name.has_name and dfhack.TranslateName(unit.name) or 'Nameless'
     local civilization = ( unit.civ_id == dwarf_civ ) and 'Local' or 'Foreigner'
     local print_str = ('%s, %s, %s:'):format(civilization, race_name, name)
-    local mother = df.unit.find(unit.relations.mother_id)
+    local mother = df.unit.find(unit.relationship_ids[df.unit_relationship_type.Mother])
     genes = record_genes(genes, mother, 0)
     -- mother will act as father in the event that a surrogate hasn't been located
     local father = mother
     -- Father's that are not on the map do not have unit data
-    if unit.relations.father_id ~= -1 and df.unit.find(unit.relations.father_id) and not df.unit.find(unit.relations.father_id).flags1.dead then
-        father = df.unit.find(unit.relations.father_id)
+    if unit.relationship_ids[df.unit_relationship_type.Father] ~= -1 and df.unit.find(unit.relationship_ids[df.unit_relationship_type.Father]) and not df.unit.find(unit.relationship_ids[df.unit_relationship_type.Father]).flags1.dead then
+        father = df.unit.find(unit.relationship_ids[df.unit_relationship_type.Father])
     elseif surrogate_fathers[creature_id] then
         father = surrogate_fathers[creature_id]
     end
