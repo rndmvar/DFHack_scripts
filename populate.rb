@@ -19,7 +19,7 @@ $script_args << '-h' if $script_args.empty?
 
 arg_parse = OptionParser.new do |opts|
     opts.default_argv = $script_args # Ruby plugin for Dwarf Fortress does not populate ARGV natively
-    opts.banner = "Usage: populate -s CREATURE [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] [-d] [-v]"
+    opts.banner = "Usage: populate -s CREATURE [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] [-a] [-d] [-v]"
     options[:regions] = 0
     options[:locations] = 0
     options[:display] = false
@@ -45,8 +45,8 @@ arg_parse = OptionParser.new do |opts|
     opts.on("-e", "--existing", "Add populations only to regions where a regional population already exists.") do |e|
         options[:existing] = e
     end
-    opts.on("-n", "--need-site", "Restrict habitable locations to those with sites.") do |n|
-        options[:require_site] = n
+    opts.on("-n", "--need-site [TYPE]", "Restrict habitable locations to those with sites.", "Valid TYPEs: PlayerFortress, DarkFortress, Cave, MountainHalls,", "  ForestRetreat, Town, ImportantLocation, LairShrine, Fortress, Camp, Monument") do |n|
+        options[:require_site] = n ? n : true
     end
     opts.separator "Modifiers:"
     opts.on("-b", "--boost #", Integer, "Increment region populations by the specified amount.") do |b|
@@ -83,6 +83,14 @@ rescue OptionParser::InvalidOption, OptionParser::MissingArgument
   exit
 end
 
+if options[:require_site].is_a?(''.class)
+    site_types = {}
+    DFHack::WorldSiteType.enum.each do |key, value|
+        site_types[value.inspect.sub(':', '')] = value
+    end
+    options[:require_site] = site_types[options[:require_site]]
+end
+
 creature = options[:species]
 creature_idx = df.world.raws.creatures.all.index { |cr| cr.creature_id == creature }
 if not creature_idx
@@ -105,6 +113,8 @@ elsif creature.flags[:AnyVermin]
 end
 
 world_data = df.world.world_data
+width = world_data.world_width
+height = world_data.world_height
 
 fort_id = df.ui.site_id
 fortress_site = world_data.sites[fort_id - 1] # site_id is off by one as array addressing starts at zero, while site.id starts at one
@@ -118,17 +128,6 @@ if not fortress_site or ( fortress_site and fortress_site.id != fort_id )
         end
     end
 end
-
-width = world_data.world_width
-height = world_data.world_height
-min_x = 0
-max_x = width - 1 # no off by one errors please
-min_y = 0
-max_y = height - 1 # no off by one errors please
-x_range = (min_x..max_x).to_a
-y_range = (min_y..max_y).to_a
-
-local_populations = Array.new(width) { Array.new(height) }
 
 surroundings = lambda{ |evilness, savagery|
     flags = {}
@@ -265,7 +264,7 @@ region_type = lambda{ |rainfall, drainage, elevation, temperature, salinity, bio
 }
 
 # Check to see if a creature's raws will allow it to inhabit this location's biome
-can_habitate = lambda{ |surround_flags, biome_flags|
+can_habitate = lambda{ |creature_raw, surround_flags, biome_flags|
     alignment = true
     alignment_match = nil
     biome = false
@@ -276,9 +275,9 @@ can_habitate = lambda{ |surround_flags, biome_flags|
     # However, it is not a requirement to have an alignment.  
     # So, we exclude locations where the creature's required alignment is not present.
     surround_flags.each do |key, align|
-        if creature.flags[key] and not align
+        if creature_raw.flags[key] and not align
             alignment = false
-        elsif creature.flags[key] and align
+        elsif creature_raw.flags[key] and align
             alignment_match = key
         end
         if align
@@ -286,7 +285,7 @@ can_habitate = lambda{ |surround_flags, biome_flags|
         end
     end
     biome_flags.each do |key, bio|
-        if creature.flags[key] and bio
+        if creature_raw.flags[key] and bio
             biome = true
             biome_match = key
             # Only one biome match is needed for habitation
@@ -338,173 +337,216 @@ def local_population_alloc(type, race, quantity=1, x=0, y=0, index=0)
 end
 
 # Check for existing local populations so that we are not adding duplicates
-found = 0
-incremented_pops = 0
-df.world.populations.each_with_index do |local_population, index|
-    next if not local_population.race == creature_idx
-    found += 1
-    x = local_population.population.region_x
-    y = local_population.population.region_y
-    local_populations[x][y] = [index, local_population]
-    dead_pop = ( local_population.flags.already_removed or local_population.flags.unk3 )
-    if options[:extinct] and local_population.flags.extinct and not dead_pop
-        local_population.flags.extinct = false
-        local_population.quantity = options[:extinct]
-        local_population.quantity2 = options[:extinct]
-        puts('[%3d, %3d] Repopulated with %d %s' % [x, y, options[:extinct], creature_name])
-    end
-    dead_pop = ( local_population.flags.extinct or local_population.flags.already_removed or local_population.flags.unk3 )
-    if options[:increment] and not dead_pop
-        old_count = local_population.quantity
-        local_population.quantity += options[:increment]
-        # Not sure if quantity2 is linked to quantity, so we'll set it's value, rather than try to raise it.
-        # Suspect it may be linked as all values of quantity2 that I've observed have been equal to quantity(1)
-        local_population.quantity2 = local_population.quantity
-        incremented_pops += 1
-        puts('[%3d, %3d] Repopulated with %d %s. [old: %d, new: %d]' % [x, y, options[:increment], creature_name, old_count, local_population.quantity])
-    end
-end
-puts('%d local population(s) modified.' % [incremented_pops]) if incremented_pops > 0
+get_local = lambda{ |race_index, world_width, world_height, opts|
+    incremented = 0
+    located = 0
 
-boosted_pops = 0
-world_pop_by_region = {}
-# Check for existing regional populations so that we are not adding duplicates
-world_data.regions.each_with_index do |region, reg_idx|
-    region.population.each_with_index do |reg_pop, pop_idx|
-        if reg_pop.race == creature_idx
-            world_pop_by_region[reg_idx] = [pop_idx, reg_pop]
-            if options[:boost]
-                min = reg_pop.count_min
-                max = reg_pop.count_max
-                reg_pop.count_min += options[:boost]
-                reg_pop.count_max += options[:boost]
-                boosted_pops += 1
-                puts("Region %d repopulated with %d %s.\n  Old: [min: %7d, max: %7d]\n  New: [min: %7d, max: %7d]" % [reg_idx, options[:boost], creature_name, min, max, reg_pop.count_min, reg_pop.count_max])
+    # Track the matching local populations by x,y coordinates
+    local_pops = Array.new(world_width) { Array.new(world_height) }
+    df.world.populations.each_with_index do |local_pop, index|
+        next if not local_pop.race == race_index
+        located += 1
+        x = local_pop.population.region_x
+        y = local_pop.population.region_y
+        local_pops[x][y] = [index, local_pop]
+        dead_pop = ( local_pop.flags.already_removed or local_pop.flags.unk3 )
+        if opts[:extinct] and local_pop.flags.extinct and not dead_pop and not opts[:display]
+            local_pop.flags.extinct = false
+            local_pop.quantity = opts[:extinct]
+            local_pop.quantity2 = opts[:extinct]
+            puts('[%3d, %3d] Repopulated with %d %s' % [x, y, opts[:extinct], creature_name])
+        end
+        dead_pop = ( local_pop.flags.extinct or local_pop.flags.already_removed or local_pop.flags.unk3 )
+        if opts[:increment] and not dead_pop
+            old_count = local_pop.quantity
+            if not opts[:display]
+                local_pop.quantity += opts[:increment]
+                # Not sure if quantity2 is linked to quantity, so we'll set it's value, rather than try to raise it.
+                # Suspect it may be linked as all values of quantity2 that I've observed have been equal to quantity(1)
+                local_pop.quantity2 = local_pop.quantity
             end
-            break # only one world_population per region
+            incremented += 1
+            puts('[%3d, %3d] Repopulated with %d %s. [old: %d, new: %d]' % [x, y, opts[:increment], creature_name, old_count, local_pop.quantity])
         end
     end
-end
-puts('%d region population(s) modified.' % [boosted_pops]) if boosted_pops > 0
+    puts('%d local population(s) modified.' % [incremented]) if incremented > 0
+    return local_pops, located
+}
 
+get_region = lambda{ |data_world, race_index, opts|
+    boosted = 0
+    world_pops = {}
+    # Check for existing regional populations so that we are not adding duplicates
+    data_world.regions.each_with_index do |region, reg_idx|
+        region.population.each_with_index do |reg_pop, pop_idx|
+            if reg_pop.race == race_index
+                world_pops[reg_idx] = [pop_idx, reg_pop]
+                if opts[:boost]
+                    min = reg_pop.count_min
+                    max = reg_pop.count_max
+                    if not opts[:display]
+                        reg_pop.count_min += opts[:boost]
+                        reg_pop.count_max += opts[:boost]
+                    end
+                    boosted += 1
+                    puts("Region %d repopulated with %d %s.\n  Old: [min: %7d, max: %7d]\n  New: [min: %7d, max: %7d]" % [reg_idx, opts[:boost], creature_name, min, max, reg_pop.count_min, reg_pop.count_max])
+                end
+                break # only one world_population per region
+            end
+        end
+    end
+    puts('%d region population(s) modified.' % [boosted]) if boosted > 0
+    return world_pops
+}
+
+check_location = lambda{ |data_world, creature_raw, x, y, sorted_regions, local_pops, populatable, count, filtered_sites, opts|
+    # Get the region map for this location
+    location = data_world.region_map[x][y]
+    region_id = location.region_id
+    # Get the region itself for this location
+    world_region = data_world.regions[region_id]
+    # Get the list of populations for this region - moved
+    #region_populations = world_region.population
+    # Check the surroundings
+    surround_flags, surround_description = surroundings[location.evilness, location.savagery]
+    # Check the biome
+    has_river = location.flags[0]
+    has_site = location.flags[3]
+    site_type_match = false
+    biome_flags, biome_description = region_type[location.rainfall, location.drainage, location.elevation, location.temperature, location.salinity, world_region.type, has_river]
+    # Check if the creature can habitate here given the surroundings and biome
+    alignment, biome, alignment_match, biome_match, surr_flags, bio_flags = can_habitate[creature_raw, surround_flags, biome_flags]
+    # Both must be true, or both must be false
+    # (T&T) To use existing, the flag must be set, and there must be an established regional population.
+    # (F&F) To not use existing, the flag must not be set, and there must be no existing regional population.
+    use_existing = ( ( opts[:existing] and sorted_regions[region_id] ) or ( not opts[:existing] and not sorted_regions[region_id] ) )
+    location_info = {region: region_id, x: x, y: y, surr_desc: surround_description, biome_desc: biome_description, site: false, sites: false}
+    if has_site
+        location_info[:sites] = location.sites
+        site_str = ''
+        location.sites.each do |site|
+            site_str += '%s, ' % [site.type.inspect.sub(':', '')]
+            if ( opts[:require_site] and opts[:require_site].is_a?(true.class) ) or opts[:require_site] == site.type
+                site_type_match = true
+            end
+        end
+        location_info[:site] = site_str
+    end
+    if opts[:verbose]
+        puts("[%3d, %3d] Alignment match: %s; type: %s; Biome match: %s; type: %s;\n  Alignment: %s\n  Biomes: %s\n  Sites: %s\n" % [x, y, alignment, alignment_match, biome, biome_match, surr_flags.inspect, bio_flags.inspect, location_info[:site]])
+    end
+    if opts[:fortress] and not local_pops[x][y] and x == fortress_site.pos.x and y == fortress_site.pos.y
+        fortress_location = location_info
+        if not alignment
+            puts('Warning: %s despise the %s surroundings of your fort\'s location.' % [creature_name, surround_description])
+        end
+        if not biome
+            puts('Warning: %s wither in the %s biome of your fort\'s location.' % [creature_name, biome_description])
+        end
+    end
+    if alignment and biome and use_existing and not local_pops[x][y]
+        if not populatable[region_id]
+            populatable[region_id] = []
+        end
+        count += 1
+        if opts[:require_site] and not site_type_match
+            filtered_sites += 1
+        else
+            populatable[region_id].push(location_info)
+        end
+    end
+    return populatable, count, filtered_sites
+}
+
+get_available_regions = lambda{ |data_world, creature_raw, sorted_regions, local_pops, world_width, world_height, opts|
+    available = {}
+
+    min_x = 0
+    max_x = world_width - 1 # no off by one errors please
+    min_y = 0
+    max_y = world_height - 1 # no off by one errors please
+
+    x_range = (min_x..max_x).to_a
+    y_range = (min_y..max_y).to_a
+
+    count = 0
+    sites_filtered = 0
+    # Go through each location and check it's biome for if the selected creature can habitate that location
+    x_range.each do |x|
+        y_range.each do |y|
+            available, count, sites_filtered = check_location[data_world, creature_raw, x, y, sorted_regions, local_pops, available, count, sites_filtered, opts]
+        end
+    end
+    return available, count, sites_filtered
+}
+
+add_region_pops = lambda{ |data_world, populatable, sorted_regions, count_location, sites_filtered, opts|
+    # Get the list of regions
+    region_keys = populatable.keys
+    # Sort the region list by number of habitable locations contained within each region
+    region_keys.sort_by!{ |key| populatable[key].length }
+    # Reverse the sort, so that the most habitable regions are at the begining of the list, rather than the end
+    region_keys.reverse!
+    # Remove regions past the maximum allowed amount.  This will remove the regions with the least number of habitable locations.
+    # -- doesn't delete them from the actual table, just our key map
+    region_keys.slice!(opts[:regions]..65536)
+    # Take the locations in all of the remaining regions, and put them into a flat/one dimensional list
+    flat_locations = []
+    region_keys.each do |key|
+        populatable[key].each do |location|
+            flat_locations.push(location)
+        end
+    end
+    # Randomly sort the list of locations
+    flat_locations.shuffle!
+    # Remove locations past the maximum allowed amount (65 default, or what was selected by the user)
+    flat_locations.slice!(opts[:locations]..65536)
+    if fortress_location
+        if flat_locations.length >= opts[:locations]
+            flat_locations.pop()
+        end
+        flat_locations.push(fortress_location)
+    end
+    # Sorts the remaining locations by multiplying their x,y values.  This effectively groups most of the locations by region too.
+    flat_locations.sort_by!{ |loc| loc[:x] * loc[:y] }
+    exist_desc = ( opts[:existing] ) ? 'existing' : 'new'
+    location_str = "%s can live in %d %s region(s), which contain %d new location(s) that are available for habitation.\nFilters limit future habitation to %d region(s) within which %d location(s) can be inhabited." % [creature_name, populatable.length, exist_desc, count_location, region_keys.length, flat_locations.length, sites_filtered]
+    location_str += "\n Of the potential locations for habitation, %d lost consideration for lack of a [matching] site." % [sites_filtered] if sites_filtered > 0
+    work_str = "\n"
+    work_str += "\nDRY RUN:\n" if opts[:display]
+    flat_locations.each do |location|
+        location_str += "\n[%3d, %3d]: Surroundings: %13s; Biome: %45s; RegionID: %4d" % [location[:x], location[:y], location[:surr_desc], location[:biome_desc], location[:region]]
+        if location[:site]
+            location_str += "; Sites: %s" % [location[:site].gsub(/, $/, '')]
+        end
+        region_id = location[:region]
+        world_region = data_world.regions[region_id]
+        region_populations = world_region.population
+        if not sorted_regions[region_id]
+            work_str += "[RegionID: %d] New region population added.\n" % [region_id]
+            # skip doing actual work if display flag is set
+            if not opts[:display]
+                new_region_pop = world_population_alloc(:Animal, creature_idx, creature_min, creature_max)
+                region_populations.push(new_region_pop)
+                pop_idx = region_populations.length - 1 # no off by one errors please
+                sorted_regions[region_id] = [pop_idx, new_region_pop]
+            end
+        elsif not opts[:display]
+            pop_idx = sorted_regions[region_id][0]
+        end
+        new_amount = rand(creature_min..creature_max)
+        work_str += "[%3d, %3d] New local population of %d %s added.\n" % [location[:x], location[:y], new_amount, creature_name]
+        next if opts[:display]
+        new_local_pop = local_population_alloc(:Animal, creature_idx, new_amount, location[:x], location[:y], pop_idx)
+        df.world.populations.push(new_local_pop)
+    end
+    puts(location_str + work_str)
+}
+
+local_populations, found = get_local[creature_idx, width, height, options]
+world_pop_by_region = get_region[world_data, creature_idx, options]
 region_count = world_pop_by_region.length
-
-available_regions = {}
-
-locations_count = 0
-filtered_sites = 0
-# Go through each location and check it's biome for if the selected creature can habitate that location
-x_range.each do |x|
-    y_range.each do |y|
-        # Get the region map for this location
-        region = world_data.region_map[x][y]
-        # Get the region itself for this location
-        world_region = world_data.regions[region.region_id]
-        # Get the list of populations for this region - moved
-        #region_populations = world_region.population
-        # Check the surroundings
-        surround_flags, surround_description = surroundings[region.evilness, region.savagery]
-        # Check the biome
-        has_river = region.flags[0]
-        has_site = region.flags[3]
-        biome_flags, biome_description = region_type[region.rainfall, region.drainage, region.elevation, region.temperature, region.salinity, world_region.type, has_river]
-        # Check if the creature can habitate here given the surroundings and biome
-        alignment, biome, alignment_match, biome_match, surr_flags, bio_flags = can_habitate[surround_flags, biome_flags]
-        # Both must be true, or both must be false
-        # (T&T) To use existing, the flag must be set, and there must be an established regional population.
-        # (F&F) To not use existing, the flag must not be set, and there must be no existing regional population.
-        use_existing = ( ( options[:existing] and world_pop_by_region[region.region_id] ) or ( not options[:existing] and not world_pop_by_region[region.region_id] ) )
-        location_info = {region: region.region_id, x: x, y: y, surr_desc: surround_description, biome_desc: biome_description, site: false}
-        if has_site
-            site_str = ''
-            region.sites.each do |site|
-                site_str += '%s, ' % [site.type.inspect.sub(':', '')]
-            end
-            location_info[:site] = site_str
-        end
-        if options[:verbose]
-            puts("[%3d, %3d] Alignment match: %s; type: %s; Biome match: %s; type: %s;\n  Alignment: %s\n  Biomes: %s\n  Sites: %s\n" % [x, y, alignment, alignment_match, biome, biome_match, surr_flags.inspect, bio_flags.inspect, location_info[:site]])
-        end
-        if options[:fortress] and not local_populations[x][y] and x == fortress_site.pos.x and y == fortress_site.pos.y
-            fortress_location = location_info
-            if not alignment
-                puts('Warning: %s despise the %s surroundings of your fort\'s location.' % [creature_name, surround_description])
-            end
-            if not biome
-                puts('Warning: %s wither in the %s biome of your fort\'s location.' % [creature_name, biome_description])
-            end
-        end
-        if alignment and biome and use_existing and not local_populations[x][y]
-            if not available_regions[region.region_id]
-                available_regions[region.region_id] = []
-            end
-            locations_count += 1
-            if options[:require_site] and not has_site
-                filtered_sites += 1
-                next
-            end
-            available_regions[region.region_id].push(location_info)
-        end
-    end
-end
-
+available_regions, locations_count, filtered_sites = get_available_regions[world_data, creature, world_pop_by_region, local_populations, width, height, options]
 found_str = ( found == 0 and region_count == 0 ) ? "%s exist nowhere in this world, at this time." % [creature_name] : "%s have been found already living in %d region(s), which contain %d location(s) that have active populations." % [creature_name, region_count, found]
 puts(found_str)
-
-# Get the list of regions
-region_keys = available_regions.keys
-# Sort the region list by number of habitable locations contained within each region
-region_keys.sort_by!{ |key| available_regions[key].length }
-# Reverse the sort, so that the most habitable regions are at the begining of the list, rather than the end
-region_keys.reverse!
-# Remove regions past the maximum allowed amount.  This will remove the regions with the least number of habitable locations.
-# -- doesn't delete them from the actual table, just our key map
-region_keys.slice!(options[:regions]..65536)
-# Take the locations in all of the remaining regions, and put them into a flat/one dimensional list
-flat_locations = []
-region_keys.each do |key|
-    available_regions[key].each do |location|
-        flat_locations.push(location)
-    end
-end
-# Randomly sort the list of locations
-flat_locations.shuffle!
-# Remove locations past the maximum allowed amount (65 default, or what was selected by the user)
-flat_locations.slice!(options[:locations]..65536)
-if fortress_location
-    if flat_locations.length >= options[:locations]
-        flat_locations.pop()
-    end
-    flat_locations.push(fortress_location)
-end
-# Sorts the remaining locations by multiplying their x,y values.  This effectively groups most of the locations by region too.
-flat_locations.sort_by!{ |loc| loc[:x] * loc[:y] }
-exist_desc = ( options[:existing] ) ? 'existing' : 'new'
-location_str = "%s can live in %d %s region(s), which contain %d new location(s) that are available for habitation.\nFilters limit future habitation to %d region(s) within which %d location(s) can be inhabited." % [creature_name, available_regions.length, exist_desc, locations_count, region_keys.length, flat_locations.length, filtered_sites]
-location_str += "\n Of the potential locations for habitation, %d lost consideration for lack of a site." % [filtered_sites] if filtered_sites > 0
-work_str = "\n"
-flat_locations.each do |location|
-    location_str += "\n[%3d, %3d]: Surroundings: %13s; Biome: %45s; RegionID: %4d" % [location[:x], location[:y], location[:surr_desc], location[:biome_desc], location[:region]]
-    if location[:site]
-        location_str += "; Sites: %s" % [location[:site].gsub(/, $/, '')]
-    end
-    # skip doing actual work if display flag is set
-    next if options[:display]
-    region_id = location[:region]
-    world_region = world_data.regions[region_id]
-    region_populations = world_region.population
-    if not world_pop_by_region[region_id]
-        work_str += "[RegionID: %d] New region population added.\n" % [region_id]
-        new_region_pop = world_population_alloc(:Animal, creature_idx, creature_min, creature_max)
-        region_populations.push(new_region_pop)
-        pop_idx = region_populations.length - 1 # no off by one errors please
-        world_pop_by_region[region_id] = [pop_idx, new_region_pop]
-    else
-        pop_idx = world_pop_by_region[region_id][0]
-    end
-    new_amount = rand(creature_min..creature_max)
-    work_str += "[%3d, %3d] New local population of %d %s added.\n" % [location[:x], location[:y], new_amount, creature_name]
-    new_local_pop = local_population_alloc(:Animal, creature_idx, new_amount, location[:x], location[:y], pop_idx)
-    df.world.populations.push(new_local_pop)
-end
-puts(location_str + work_str)
+add_region_pops[world_data, available_regions, world_pop_by_region, locations_count, filtered_sites, options]
