@@ -1,7 +1,7 @@
 # Add specified caste to regions where it can live.  Good for repopulating a nearly extinct species, or adding one that never lived in the world.
 =begin
 
-populate -s CREATURE [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] [-d] [-v]
+populate -s CREATURE ( [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] ) ( [-t #] [-c #] [-o CREATURE] [-a] [-m #] [-p #] [-k] [-z] ) [-d] [-v]
 
 =end
 
@@ -19,7 +19,7 @@ $script_args << '-h' if $script_args.empty?
 
 arg_parse = OptionParser.new do |opts|
     opts.default_argv = $script_args # Ruby plugin for Dwarf Fortress does not populate ARGV natively
-    opts.banner = "Usage: populate -s CREATURE [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] [-d] [-v]"
+    opts.banner = "Usage: populate -s CREATURE ( [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] ) ( [-t #] [-c #] [-o CREATURE] [-a] [-m #] [-p #] [-k] [-z] ) [-d] [-v]"
     options[:regions] = 0
     options[:locations] = 0
     options[:display] = false
@@ -102,6 +102,27 @@ arg_parse = OptionParser.new do |opts|
     opts.on("-v", "--verbose", "Print extra information to the console.") do |v|
         options[:verbose] = v
     end
+    opts.separator "Examples:"
+    opts.separator "  Add Kea birds to 3 regions and 10 locations:"
+    opts.separator "    populate -s BIRD_KEA -r 3 -l 10"
+    opts.separator "  Now only add to 10 locations in up to 3 regions where Keas already live:"
+    opts.separator "    populate -s BIRD_KEA -r 3 -l 10 -e"
+    opts.separator "  Or drop some wild populations on the Elves by requiring sites with ForestRetreat:"
+    opts.separator "    populate -s BIRD_KEA -r 3 -l 10 -n ForestRetreat"
+    opts.separator "  Or maybe just increase already existing populations:"
+    opts.separator "    populate -s BIRD_KEA -b 1000 -i 100"
+    opts.separator "  Or maybe you want (tame) ones in Elven trade caravans:"
+    opts.separator "    populate -s BIRD_KEA -o ELF -a"
+    opts.separator "  Or maybe you don\'t want (tame) ones in Elven trade caravans:"
+    opts.separator "    populate -s BIRD_KEA -o ELF -z"
+    opts.separator "  And you don\'t want (tame) vermin either:"
+    opts.separator "    populate -s BIRD_KEA -o ELF -z -k"
+    opts.separator "  Or you think the Elves need MORE (TAME) KEAS:"
+    opts.separator "    populate -s BIRD_KEA -o ELF -p 1000"
+    opts.separator "  Maybe you just want to see what a command WILL do:"
+    opts.separator "    populate -s BIRD_KEA -o ELF -p 1000 -d"
+    opts.separator "  You really want lots of text printed to your screen:"
+    opts.separator "    populate -s BIRD_KEA -o ELF -p 1000 -d -v"
 end
 
 begin
