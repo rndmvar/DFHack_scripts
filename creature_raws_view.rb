@@ -92,8 +92,8 @@ def material_by_id(mat=-1, matidx=-1)
     return "%s %s" % [target_creature.creature_id, describe_material(target_creature.material[index], index, "    ")]
 end
 
-def describe_caste(caste, indent="  ")
-    description_str = "Caste: %s\n" % [caste.caste_id] 
+def describe_caste(creature_raw, caste, indent="  ")
+    description_str = "Caste: %s\n" % [caste.caste_id]
     misc = caste.misc
     extracts = caste.extracts
     has_eggs = ( extracts.egg_material_mattype.length > 0 or extracts.lays_unusual_eggs_itemtype.length > 0 )
@@ -130,6 +130,17 @@ def describe_caste(caste, indent="  ")
     description_str += "  EGG:\n" if extracts.egg_material_mattype.length > 0
     extracts.egg_material_mattype.each_with_index do |mattype, idx|
         description_str += "%s\n" % material_by_id(mattype, extracts.egg_material_matindex[idx])
+    end
+    description_str += "Shearable Parts:\n" if caste.shearable_tissue_layer.length > 0
+    shearable_parts = []
+    caste.shearable_tissue_layer.each do |shearable|
+        shearable.part_idx.each_with_index do |part_idx, idx|
+            shearable_parts.push caste.body_info.body_parts[part_idx].layers[shearable.layer_idx[idx]].tissue_id
+        end
+    end
+    shearable_parts.sort!.uniq!
+    shearable_parts.each do |mat_idx|
+        description_str += "  %s" % [describe_material(creature_raw.material[mat_idx], mat_idx, "    ")]
     end
     #description_str += "UNUSUAL_EGG:\n"
     #extracts.lays_unusual_eggs_itemtype.each_with_index do |mattype, idx|
@@ -168,7 +179,7 @@ def describe_creature(creature_id='')
     end
     puts("CREATURE MATERIALS:\n  " + material_strings.join('  '))
     creature_raw.caste.each do |caste|
-        puts(describe_caste(caste))
+        puts(describe_caste(creature_raw, caste))
     end
 end
 
