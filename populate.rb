@@ -1027,6 +1027,7 @@ add_entity_pops = lambda{ |entity_idx, race_idx, opts|
     entity = df.world.entities.all[entity_idx]
     animals = entity.resources.animals
     race = df.world.raws.creatures.all[race_idx]
+    sell_prices, sell_requests = get_sell_prices(entity_idx) # will be nil,nil for non-civ entities
     race.caste.each_with_index do |caste, caste_idx|
         flags = caste.flags
         pet = ( ( flags[:PET] or flags[:PET_EXOTIC] ) and not two_includes[animals.pet_races, animals.pet_castes, race_idx, caste_idx] )
@@ -1036,12 +1037,15 @@ add_entity_pops = lambda{ |entity_idx, race_idx, opts|
         wagon_puller = ( flags[:WAGON_PULLER] and not two_includes[animals.wagon_puller_races, animals.wagon_puller_castes, race_idx, caste_idx] )
         mount = ( ( flags[:MOUNT] or flags[:MOUNT_EXOTIC] ) and not two_includes[animals.mount_races, animals.mount_castes, race_idx, caste_idx] )
         minion = ( flags[:TRAINABLE_WAR] and not flags[:CAN_LEARN] and not two_includes[animals.minion_races, animals.minion_castes, race_idx, caste_idx] )
+        egg_layer = ( ( flags[:LAYS_EGGS] or flags[:LAYS_UNUSUAL_EGGS] ) and not two_includes[animals.minion_races, animals.minion_castes, race_idx, caste_idx] )
         entity_str += "%20s: PET=%5s, PACK_ANIMAL=%5s, WAGON_PULLER=%5s, MOUNT=%5s, MINION=%5s\n" % [caste.caste_id, pet, pack_animal, wagon_puller, mount, minion]
         next if opts[:display]
         # Only creatures in the animals.pet_races array will be available for trade
         if pet
             animals.pet_races.insert_at(0, race_idx)
             animals.pet_castes.insert_at(0, caste_idx)
+            sell_prices[:Pets].insert_at(0, 128) if sell_prices
+            sell_requests[:Pets].insert_at(0, opts[:trade_priority]) if sell_requests
         end
         # Membership in the animals.exotic_pet_races is not tied to the PET_EXOTIC tag
         # Members of animals.pet_races can be members of animals.exotic_pet_races, 
@@ -1066,8 +1070,13 @@ add_entity_pops = lambda{ |entity_idx, race_idx, opts|
             animals.minion_races.insert_at(0, race_idx)
             animals.minion_castes.insert_at(0, caste_idx)
         end
+        if egg_layer
+            entity.resources.egg_races.insert_at(0, race_idx)
+            entity.resources.egg_castes.insert_at(0, caste_idx)
+            sell_prices[:Eggs].insert_at(0, 128) if sell_prices
+            sell_requests[:Eggs].insert_at(0, opts[:trade_priority]) if sell_requests
+        end
     end
-    sell_prices, sell_requests = get_sell_prices(entity_idx) # will be nil,nil for non-civ entities
     entity_str += add_resources_entity(entity_idx, race_idx, sell_prices, sell_requests, opts)
     return entity_str
 }
@@ -1117,7 +1126,7 @@ remove_entity_pops = lambda{ |entity_id, race_id, opts|
     animals = resources.animals
     # put together a 2d array of races, castes, and their string description for operating on
     pet_pairs = [
-                [animals.pet_races, animals.pet_castes, 'pets'], # description word "pets" is used in a conditional below -- for this array entry only
+                [animals.pet_races, animals.pet_castes, 'pets'], # description word "pets" is used in a conditional below
                 [animals.wagon_races, animals.wagon_castes, 'wagons'],
                 [animals.pack_animal_races, animals.pack_animal_castes, 'pack animals'],
                 [animals.wagon_puller_races, animals.wagon_puller_castes, 'wagon pullers'],
@@ -1127,7 +1136,7 @@ remove_entity_pops = lambda{ |entity_id, race_id, opts|
                 [animals.exotic_pet_races, animals.exotic_pet_castes, 'exotic pets'],
                 # These aren't in animals, so disabled for now
                 #[resources.fish_races, resources.fish_castes],
-                [resources.egg_races, resources.egg_castes],
+                [resources.egg_races, resources.egg_castes, 'egg layers'], # description word "egg layers" is used in a conditional below
                 ]
     found_races = []
     found_animals = []
@@ -1156,6 +1165,8 @@ remove_entity_pops = lambda{ |entity_id, race_id, opts|
     end
     # track the removed pet indexes here for removal from export agreements later
     removed_pets = []
+    # track the removed egg layer indexes here for removal from export agreements later
+    removed_layers = []
     # go through this entity's races and remove marked populations
     pet_pairs.each_with_index do |pet_types, idx|
         remove_indexes = []
@@ -1176,6 +1187,7 @@ remove_entity_pops = lambda{ |entity_id, race_id, opts|
         next if opts[:display]
         remove_vector_items(remove_indexes, [pet_types[0], pet_types[1]])
         removed_pets = remove_indexes if pet_types[2] == "pets"
+        removed_layers = remove_indexes if pet_types[2] == "egg layers"
     end
     sell_prices, sell_requests = get_sell_prices(entity_id) # will be nil,nil for non-civ entities
     if entity.type == :Civilization
@@ -1196,8 +1208,10 @@ remove_entity_pops = lambda{ |entity_id, race_id, opts|
         if not opts[:display]
             if sell_prices
                 remove_vector_items(removed_pets, [ sell_prices[:Pets], sell_requests[:Pets] ])
+                remove_vector_items(removed_layers, [ sell_prices[:Eggs], sell_requests[:Eggs] ])
             elsif sell_requests
                 remove_vector_items(removed_pets, [ sell_requests[:Pets] ])
+                remove_vector_items(removed_layers, [ sell_requests[:Eggs] ])
             end
         end
     end
