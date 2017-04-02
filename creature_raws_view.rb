@@ -62,11 +62,13 @@ end
 
 def describe_reaction_product(prod, indent="  ")
     description_str = "\n"
+    #p prod.material.inspect
     prod.id.each_with_index do |id, idx|
         description_str += "Type: %s\n%s" % [id, indent]
-        prod.str.each do |type_str|
-            description_str += "%s " % [type_str[idx]]
-        end
+        description_str += material_by_id(prod.material.mat_type[idx], prod.material.mat_index[idx])
+        #prod.str.each do |type_str|
+        #    description_str += "%s " % [type_str[idx]]
+        #end
         description_str += "\n"
     end
     description_str = description_str.split("\n").join("\n" + indent)
@@ -74,22 +76,23 @@ def describe_reaction_product(prod, indent="  ")
 end
 
 def describe_material(mat, index=-1, indent="  ")
+    return "" if mat == nil
     description_str = "%s (%d)\nValue: %d\n" % [mat.id, index, mat.material_value]
     description_str += "Flags: %s \n" % [format_flags(mat.flags)]
-    description_str += "Reaction Classes: %s\n" % [join_vector(mat.reaction_class)]
-    description_str += "Reaction Products: %s\n" % [describe_reaction_product(mat.reaction_product)]
+    description_str += "Reaction Classes: %s\n" % [join_vector(mat.reaction_class)] if mat.reaction_class.length > 0
+    description_str += "Reaction Products: %s\n" % [describe_reaction_product(mat.reaction_product)] if mat.reaction_product.id.length > 0
     description_str = description_str.split("\n").join("\n" + indent)
     return description_str + "\n"
 end
 
-def material_by_id(mat=-1, matidx=-1)
+def material_by_id(mat=-1, matidx=-1, indent="  ")
     if mat == -1 or matidx == -1
         return ""
     end
     # I don't know why entries are off by 19 consistently, but they are
     index = mat - 19
     target_creature = df.world.raws.creatures.all[matidx]
-    return "%s %s" % [target_creature.creature_id, describe_material(target_creature.material[index], index, "    ")]
+    return "%s %s" % [target_creature.creature_id, describe_material(target_creature.material[index], index, indent + "  ")]
 end
 
 def describe_caste(creature_raw, caste, indent="  ")
@@ -131,16 +134,33 @@ def describe_caste(creature_raw, caste, indent="  ")
     extracts.egg_material_mattype.each_with_index do |mattype, idx|
         description_str += "%s\n" % material_by_id(mattype, extracts.egg_material_matindex[idx])
     end
-    description_str += "Shearable Parts:\n" if caste.shearable_tissue_layer.length > 0
-    shearable_parts = []
-    caste.shearable_tissue_layer.each do |shearable|
-        shearable.part_idx.each_with_index do |part_idx, idx|
-            shearable_parts.push caste.body_info.body_parts[part_idx].layers[shearable.layer_idx[idx]].tissue_id
+    if caste.shearable_tissue_layer.length > 0
+        description_str += "Shearable Parts:\n" 
+        shearable_parts = []
+        caste.shearable_tissue_layer.each do |shearable|
+            shearable.part_idx.each_with_index do |part_idx, idx|
+                shearable_parts.push caste.body_info.body_parts[part_idx].layers[shearable.layer_idx[idx]].tissue_id
+            end
+        end
+        shearable_parts.sort!
+        shearable_parts.uniq!
+        shearable_parts.each do |tissue_idx|
+            tissue = creature_raw.tissue[tissue_idx]
+             description_str += "  %s" % [material_by_id(tissue.mat_type, tissue.mat_index, "    ")]
         end
     end
-    shearable_parts.sort!.uniq!
-    shearable_parts.each do |mat_idx|
-        description_str += "  %s" % [describe_material(creature_raw.material[mat_idx], mat_idx, "    ")]
+    description_str += "Butcherable Parts:\n"
+    harvestable = []
+    caste.body_info.body_parts.each_with_index do |part, part_idx|
+        part.layers.each_with_index do |layer, layer_idx|
+            harvestable.push(layer.tissue_id)
+        end
+    end
+    harvestable.sort!
+    harvestable.uniq!
+    harvestable.each do |tissue_idx|
+        tissue = creature_raw.tissue[tissue_idx]
+        description_str += "  %s" % [material_by_id(tissue.mat_type, tissue.mat_index, "    ")]
     end
     #description_str += "UNUSUAL_EGG:\n"
     #extracts.lays_unusual_eggs_itemtype.each_with_index do |mattype, idx|
@@ -170,7 +190,6 @@ def describe_creature(creature_id='')
     description_str = "Baby Name: %s\nChild Name: %s\n" % [general_baby_name, general_child_name]
     description_str += "Frequency: %d%%\nPopulation size: %d-%d\n" % [creature_raw.frequency, creature_raw.population_number[1], creature_raw.population_number[0]]
     description_str += "Size (Adult): %d\n" % [creature_raw.adultsize]
-    #description_str += "Caste Population Ratio: %s\n" % [creature_raw.pop_ratio.inspect]
     description_str += "Flags: %s\n" % [format_flags(creature_raw.flags, "\n       ")]
     puts(description_str)
     material_strings = []
