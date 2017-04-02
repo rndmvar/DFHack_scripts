@@ -1,7 +1,7 @@
 # Add specified caste to regions where it can live.  Good for repopulating a nearly extinct species, or adding one that never lived in the world.
 =begin
 
-populate -s CREATURE ( [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] ) ( [-t #] [-c #] [-o CREATURE] [-a] [-m #] [-p #] [-k] [-z] ) [-d] [-v]
+populate -s CREATURE ( [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] ) ( [-t #] [-c #] [-o CREATURE] [-a] [-m #] [-p #] [-k] [-z] [-u #] ) [-d] [-v]
 
 =end
 
@@ -19,7 +19,7 @@ $script_args << '-h' if $script_args.empty?
 
 arg_parse = OptionParser.new do |opts|
     opts.default_argv = $script_args # Ruby plugin for Dwarf Fortress does not populate ARGV natively
-    opts.banner = "Usage: populate -s CREATURE ( [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] ) ( [-t #] [-c #] [-o CREATURE] [-a] [-m #] [-p #] [-k] [-z] ) [-d] [-v]"
+    opts.banner = "Usage: populate -s CREATURE ( [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] ) ( [-t #] [-c #] [-o CREATURE] [-a] [-m #] [-p #] [-k] [-z] [-u #] ) [-d] [-v]"
     options[:regions] = 0
     options[:locations] = 0
     options[:display] = false
@@ -38,6 +38,7 @@ arg_parse = OptionParser.new do |opts|
     options[:add_amount] = 0
     options[:all_vermin] = false
     options[:remove_animal] = false
+    options[:trade_priority] = 0
 
     opts.separator "Mandatory arguments:"
     opts.on("-s", "--species CREATURE", "Raw creature name to [re]populate.") do |s|
@@ -88,6 +89,9 @@ arg_parse = OptionParser.new do |opts|
     end
     opts.on("-z", "--remove-animal", "The creature [-s] will be removed from the target civilization\'s pet list/trading goods and site populations.") do |z|
         options[:remove_animal] = z
+    end
+    opts.on("-y", "--trade-priority #", Integer, "The creature [-s] that was added [-a] will have all of their trade goods set to this priority.") do |y|
+        options[:trade_priority] = y
     end
     opts.separator "Special options:"
     opts.on("-x", "--extinct #", Integer, "Remove the extinct flag from populations of this species,", " and set the population amount to the specified number.") do |x|
@@ -145,6 +149,9 @@ if options[:require_site].is_a?(''.class)
     end
     options[:require_site] = site_types[options[:require_site]]
 end
+
+options[:trade_priority] = 0 if options[:trade_priority] < 0
+options[:trade_priority] = 4 if options[:trade_priority] > 4
 
 creature = options[:species]
 creature_idx = df.world.raws.creatures.all.index { |cr| cr.creature_id == creature }
@@ -417,6 +424,49 @@ def local_population_alloc(type, race, quantity=1, x=0, y=0, index=0)
     return pop
 end
 
+def format_flags(flags, join_str=", ")
+    flags_array = flags.inspect.sub('>', '').split(" ")[1..100].sort!
+    return flags_array.join(join_str)
+end
+
+def join_vector(vector, join_str=", ")
+    v_arr = []
+    vector.each do |item|; v_arr.push(item); end
+    return v_arr.join(join_str)
+end
+
+def describe_reaction_product(prod, indent="  ")
+    description_str = "\n"
+    prod.id.each_with_index do |id, idx|
+        description_str += "Type: %s\n%s" % [id, indent]
+        prod.str.each do |type_str|
+            description_str += "%s " % [type_str[idx]]
+        end
+        description_str += "\n"
+    end
+    description_str = description_str.split("\n").join("\n" + indent)
+    return description_str
+end
+
+def describe_material(mat, index=-1, indent="  ")
+    description_str = "%s (%d)\nValue: %d\n" % [mat.id, index, mat.material_value]
+    description_str += "Flags: %s \n" % [format_flags(mat.flags)]
+    description_str += "Reaction Classes: %s\n" % [join_vector(mat.reaction_class)]
+    description_str += "Reaction Products: %s\n" % [describe_reaction_product(mat.reaction_product)]
+    description_str = description_str.split("\n").join("\n" + indent)
+    return description_str + "\n"
+end
+
+def material_by_id(mat=-1, matidx=-1)
+    if mat == -1 or matidx == -1
+        return ""
+    end
+    # I don't know why entries are off by 19 consistently, but they are
+    index = mat - 19
+    target_creature = df.world.raws.creatures.all[matidx]
+    return "%s %s" % [target_creature.creature_id, describe_material(target_creature.material[index], index, "    ")]
+end
+
 # Check for existing local populations so that we are not adding duplicates
 get_local = lambda{ |race_index, world_width, world_height, opts|
     incremented = 0
@@ -685,6 +735,293 @@ add_region_pops = lambda{ |data_world, populatable, sorted_regions, count_locati
     puts(location_str + work_str)
 }
 
+def get_empty_prices()
+    return_hash = {}
+    DFHack::EntitySellCategory::ENUM.values.each do |key|
+        return_hash[key] = []
+    end
+    return return_hash
+end
+
+def get_sell_prices(civ_idx=-1)
+    civ = df.world.entities.all[civ_idx]
+    sell_prices = nil
+    sell_requests = nil
+    civ.meeting_events.each do |meeting|
+        next if not meeting.sell_prices
+        sell_prices = meeting.sell_prices.price
+        sell_requests = meeting.sell_prices.items.priority
+    end
+    df.ui.dip_meeting_info.each do |meeting|
+        next if not meeting.civ_id == civ.id
+        # For that brief point in time where the diplomat has entered the map, but not met with the noble to discuss exports/imports
+        sell_requests = meeting.sell_requests.priority if meeting.sell_requests
+        meeting.events.each do |event|
+            next if event.sell_prices == nil
+            sell_prices = event.sell_prices.price
+            sell_requests = event.sell_prices.items.priority
+        end
+    end
+    return sell_prices, sell_requests
+end
+
+# remove items at given indexes in all vectors passed in the vectors array
+def remove_vector_items(indexes=[], vectors=[])
+    # sort indexes, then remove duplicates (shouldn't ever be any)
+    # then reverse their order so that removals aren't targeting the wrong item
+    indexes.sort!
+    indexes.uniq!
+    indexes.reverse!
+    vectors.each do |vector|
+        indexes.each do |idx|
+            vector.delete_at(idx)
+        end
+    end
+end
+
+def add_material_by_type(creature_idx=-1, material_idx=-1, materials)
+    return materials if creature_idx == -1 or material_idx == -1
+    creature_raws = df.world.raws.creatures.all[creature_idx]
+    # I don't know why materials indexes are off by 19 right now, but they are
+    adjusted_index = material_idx - 19
+    material = creature_raws.material[adjusted_index]
+    flags = material.flags
+    new_mat = [creature_idx, material_idx]
+    materials[:Leather].push(new_mat) if flags[:LEATHER] and not materials[:Leather].include? new_mat
+    materials[:Silk].push(new_mat) if flags[:SILK] and not materials[:Silk].include? new_mat
+    materials[:Wool].push(new_mat) if flags[:YARN] and not materials[:Wool].include? new_mat
+    materials[:Bone].push(new_mat) if flags[:BONE] and not materials[:Bone].include? new_mat
+    materials[:Shell].push(new_mat) if flags[:SHELL] and not materials[:Shell].include? new_mat
+    materials[:Pearl].push(new_mat) if flags[:PEARL] and not materials[:Pearl].include? new_mat
+    materials[:Ivory].push(new_mat) if flags[:TOOTH] and not materials[:Ivory].include? new_mat
+    materials[:Horn].push(new_mat) if flags[:HORN] and not materials[:Horn].include? new_mat
+    materials[:Crafts].push(new_mat) if ( flags[:TOOTH] or flags[:HORN] or flags[:BONE] ) and not materials[:Crafts].include? new_mat
+    materials[:Flasks].push(new_mat) if flags[:LEATHER] and not materials[:Flasks].include? new_mat
+    materials[:Quivers].push(new_mat) if flags[:LEATHER] and not materials[:Quivers].include? new_mat
+    materials[:Backpacks].push(new_mat) if flags[:LEATHER] and not materials[:Backpacks].include? new_mat
+    materials[:Cheese].push(new_mat) if flags[:CHEESE] and not materials[:Cheese].include? new_mat
+    materials[:Extracts].push(new_mat) if ( flags[:LIQUID_MISC_CREATURE] and flags[:EDIBLE_RAW] and flags[:EDIBLE_COOKED] ) and not materials[:Extracts].include? new_mat
+    materials[:Meat].push(new_mat) if flags[:MEAT] and not materials[:Meat].include? new_mat
+    # Go through reaction products and add valid items
+    material.reaction_product.id.each_with_index do |id, idx|
+        prod = material.reaction_product
+        materials = add_material_by_type(prod.material.mat_index[idx], prod.material.mat_type[idx], materials)
+    end
+    return materials
+end
+
+def get_creature_harvestables(creature_idx=-1)
+    creature_raws = df.world.raws.creatures.all[creature_idx]
+    materials = {
+                 Leather:   [],
+                 Silk:      [],
+                 Wool:      [],
+                 Bone:      [],
+                 Shell:     [],
+                 Pearl:     [],
+                 Ivory:     [],
+                 Horn:      [],
+                 Crafts:    [],
+                 Flasks:    [],
+                 Quivers:   [],
+                 Backpacks: [],
+                 Cheese:    [],
+                 Extracts:  [],
+                 Meat:      [],
+                 Eggs:      [],
+                }
+    creature_raws.caste.each do |caste|
+        misc = caste.misc
+        extracts = caste.extracts
+        add_material_by_type(extracts.milkable_matidx, extracts.milkable_mat, materials)
+        add_material_by_type(extracts.webber_matidx, extracts.webber_mat, materials)
+        extracts.egg_material_mattype.each_with_index do |mattype, idx|
+            materials[:Eggs].push([extracts.egg_material_matindex[idx], mattype]) if extracts.egg_material_matindex[idx] > -1
+        end
+        if caste.shearable_tissue_layer.length > 0
+            shearable_parts = []
+            caste.shearable_tissue_layer.each do |shearable|
+                shearable.part_idx.each_with_index do |part_idx, idx|
+                    shearable_parts.push caste.body_info.body_parts[part_idx].layers[shearable.layer_idx[idx]].tissue_id
+                end
+            end
+            shearable_parts.sort!
+            shearable_parts.uniq!
+            shearable_parts.each do |tissue_idx|
+                tissue = creature_raws.tissue[tissue_idx]
+                add_material_by_type(tissue.mat_index, tissue.mat_type, materials)
+            end
+        end
+        harvestable = []
+        caste.body_info.body_parts.each_with_index do |part, part_idx|
+            part.layers.each_with_index do |layer, layer_idx|
+                harvestable.push(layer.tissue_id)
+            end
+        end
+        harvestable.sort!
+        harvestable.uniq!
+        harvestable.each do |tissue_idx|
+            tissue = creature_raws.tissue[tissue_idx]
+            add_material_by_type(tissue.mat_index, tissue.mat_type, materials)
+        end
+    end
+    return materials
+end
+
+def add_resources_entity(entity_idx=-1, creature_idx=-1, sell_prices, sell_requests, opts)
+    harvestables = get_creature_harvestables(creature_idx)
+    # Emulate a sell_prices/sell_requests list if none is returned to simplify code later
+    sell_prices = get_empty_prices() if not sell_prices
+    sell_requests = get_empty_prices() if not sell_requests
+    # get entity by index
+    entity = df.world.entities.all[entity_idx]
+    # create shortcuts for resources
+    resources = entity.resources
+    organic = resources.organic
+    refuse = resources.refuse
+    misc_mat = resources.misc_mat
+    work_str = ""
+    # create a hash table of materials to check for addition
+    materials = {Leather:   [organic.leather,    [ [ sell_prices[:Leather],       sell_requests[:Leather] ],  
+                                                   [ sell_prices[:BagsLeather],   sell_requests[:BagsLeather] ] ] ], # direct leather mappings
+                 Silk:      [organic.silk,       [ [ sell_prices[:ClothSilk],     sell_requests[:ClothSilk] ],
+                                                   [ sell_prices[:BagsSilk],      sell_requests[:BagsSilk] ],
+                                                   [ sell_prices[:ThreadSilk],    sell_requests[:ThreadSilk] ],
+                                                   [ sell_prices[:RopesSilk],     sell_requests[:RopesSilk] ] ] ], # direct silk mappings
+                 Wool:      [organic.wool,       [ [ sell_prices[:BagsYarn],      sell_requests[:BagsYarn] ],
+                                                   [ sell_prices[:RopesYarn],     sell_requests[:RopesYarn] ],
+                                                   [ sell_prices[:ClothYarn],     sell_requests[:ClothYarn] ],
+                                                   [ sell_prices[:ThreadYarn],    sell_requests[:ThreadYarn] ] ] ], # direct yarn mappings
+                 Bone:      [refuse.bone,        [] ], # no direct bone mappings
+                 Shell:     [refuse.shell,       [] ], # no direct shell mappings
+                 Pearl:     [refuse.pearl,       [] ], # no direct pearl mappings
+                 Ivory:     [refuse.ivory,       [] ], # no direct ivory mappings :: tusks, and teeth
+                 Horn:      [refuse.horn,        [] ], # no direct horn mappings  :: hoofs too
+                 # direct craft mappings :: metal, stone, gem, bone, etc...
+                 Crafts:    [misc_mat.crafts,    [ [ sell_prices[:Crafts],        sell_requests[:Crafts] ] ] ], 
+                 # direct mappings from flasks to :FlasksWaterskins :: metal flasks and leather waterskins
+                 Flasks:    [misc_mat.flasks,    [ [ sell_prices[:FlasksWaterskins], 
+                                                       sell_requests[:FlasksWaterskins] ] ] ], 
+                 # Quivers and Backpacks are NOT included with Leather as their values are NOT mapped directly to Leather's
+                 Quivers:   [misc_mat.quivers,   [ [ sell_prices[:Quivers],       sell_requests[:Quivers] ] ] ], # leather
+                 Backpacks: [misc_mat.backpacks, [ [ sell_prices[:Backpacks],     sell_requests[:Backpacks] ] ] ], # leather
+                 Cheese:    [misc_mat.cheese,    [ [ sell_prices[:Cheese],        sell_requests[:Cheese] ] ] ],
+                 # direct extracts mappings :: milk, venom, blood, sweat, etc...
+                 Extracts:  [misc_mat.extracts,  [ [ sell_prices[:Extracts],      sell_requests[:Extracts] ] ] ], 
+                 # direct meat mappings :: muscle, brain, liver, pancreas, etc...
+                 Meat:      [misc_mat.meat,      [ [ sell_prices[:Meat],          sell_requests[:Meat] ] ] ], 
+                 # Unknown where sheet/parchment is held in memory at this time
+                 #Sheet:     [,      []], # skin => parchment
+                 }
+    # go through each material and check for matching additions using the harvestables table
+    materials.each do |key, material|
+        # skip materials the creature doesn't have available
+        next if not harvestables[key] or harvestables[key].length == 0
+        addable = []
+        mat_index = material[0].mat_index.to_a
+        mat_type = material[0].mat_type.to_a
+        # create a 2d array of each vectors values to test if the harvestable is already present
+        mats = mat_index.collect.with_index {|x, i| [x, mat_type[i]]}
+        harvestables[key].each do |harvestable|
+            next if mats.include? harvestable
+            addable.push(harvestable) if not addable.include? harvestable
+        end
+        work_str += "Adding %d %s items.\n" % [addable.length, key]
+        next if opts[:display]
+        addable.each do |new_item|
+            # insert the new material at index zero for the entity resources
+            material[0].mat_index.insert_at(0, new_item[0])
+            material[0].mat_type.insert_at(0, new_item[1])
+            # insert new entries for the prices and requests vectors for civs the player has trade agreements with
+            material[1].each do |sell_entries|
+                # do not operate on non-vectors
+                if not sell_entries[0].is_a?(Array)
+                    # 128 appears to be the default price for items
+                    sell_entries[0].insert_at(0, 128)
+                end
+                if not sell_entries[1].is_a?(Array)
+                    # using 3 here for visibility
+                    sell_entries[1].insert_at(0, opts[:trade_priority])
+                end
+            end
+        end
+    end
+    return work_str
+end
+
+def remove_entity_resources(entity_idx=-1, creature_idx=-1, sell_prices, sell_requests, opts)
+    work_str = ""
+    # Emulate a sell_prices/sell_requests list if none is returned to simplify code later
+    sell_prices = get_empty_prices() if not sell_prices
+    sell_requests = get_empty_prices() if not sell_requests
+    # get entity by index
+    entity = df.world.entities.all[entity_idx]
+    # create shortcuts for resources
+    resources = entity.resources
+    organic = resources.organic
+    refuse = resources.refuse
+    misc_mat = resources.misc_mat
+    # get creature by index
+    creature_raws = df.world.raws.creatures.all[creature_idx]
+    # create a hash table of materials to check for removal
+    materials = {Leather:   [organic.leather,    [], [ sell_prices[:Leather],       sell_requests[:Leather],  
+                                                       sell_prices[:BagsLeather],   sell_requests[:BagsLeather] ] ], # direct leather mappings
+                 Silk:      [organic.silk,       [], [ sell_prices[:ClothSilk],     sell_requests[:ClothSilk],
+                                                       sell_prices[:BagsSilk],      sell_requests[:BagsSilk], 
+                                                       sell_prices[:ThreadSilk],    sell_requests[:ThreadSilk], 
+                                                       sell_prices[:RopesSilk],     sell_requests[:RopesSilk] ] ], # direct silk mappings
+                 Wool:      [organic.wool,       [], [ sell_prices[:BagsYarn],      sell_requests[:BagsYarn],
+                                                       sell_prices[:RopesYarn],     sell_requests[:RopesYarn], 
+                                                       sell_prices[:ClothYarn],     sell_requests[:ClothYarn], 
+                                                       sell_prices[:ThreadYarn],    sell_requests[:ThreadYarn] ] ], # direct yarn mappings
+                 Bone:      [refuse.bone,        [], [] ], # no direct bone mappings
+                 Shell:     [refuse.shell,       [], [] ], # no direct shell mappings
+                 Pearl:     [refuse.pearl,       [], [] ], # no direct pearl mappings
+                 Ivory:     [refuse.ivory,       [], [] ], # no direct ivory mappings :: tusks, and teeth
+                 Horn:      [refuse.horn,        [], [] ], # no direct horn mappings  :: hoofs too
+                 # direct craft mappings :: metal, stone, gem, bone, etc...
+                 Crafts:    [misc_mat.crafts,    [], [ sell_prices[:Crafts],        sell_requests[:Crafts] ] ], 
+                 # direct mappings from flasks to :FlasksWaterskins :: metal flasks and leather waterskins
+                 Flasks:    [misc_mat.flasks,    [], [ sell_prices[:FlasksWaterskins], 
+                                                       sell_requests[:FlasksWaterskins] ] ], 
+                 # Quivers and Backpacks are NOT included with Leather as their values are NOT mapped directly to Leather's
+                 Quivers:   [misc_mat.quivers,   [], [ sell_prices[:Quivers],       sell_requests[:Quivers] ] ], # leather
+                 Backpacks: [misc_mat.backpacks, [], [ sell_prices[:Backpacks],     sell_requests[:Backpacks] ] ], # leather
+                 Cheese:    [misc_mat.cheese,    [], [ sell_prices[:Cheese],        sell_requests[:Cheese] ] ],
+                 # direct extracts mappings :: milk, venom, blood, sweat, etc...
+                 Extracts:  [misc_mat.extracts,  [], [ sell_prices[:Extracts],      sell_requests[:Extracts] ] ], 
+                 # direct meat mappings :: muscle, brain, liver, pancreas, etc...
+                 Meat:      [misc_mat.meat,      [], [ sell_prices[:Meat],          sell_requests[:Meat] ]], 
+                 # Unknown where sheet/parchment is held in memory at this time
+                 #Sheet:     [,      []], # skin => parchment
+                 }
+    # go through each material and check for entries using the creature index
+    materials.each do |key, material|
+        # record the indexes of each material which belongs to the creature being removed
+        num_materials = material[0].mat_index.length
+        material[0].mat_index.each_with_index do |mat_idx, idx|
+            next if not mat_idx == creature_idx
+            material[1].push(idx)
+        end
+        material[1].reverse!
+        remove_array = [ material[0].mat_index, material[0].mat_type ]
+        # add any additional vectors with entries needing to be removed to the remove_array
+        material[2].each do |mat_vector|
+            # skip vectors that are not aligned
+            next if not mat_vector.length == num_materials
+            # add vector to array
+            remove_array.push(mat_vector)
+        end
+        if opts[:verbose]
+            work_str += "Removing %2d %s materials from %s.\n" % [material[1].length, creature_raws.creature_id, key]
+        end
+        if material[1].length > 0 and not opts[:display]
+            remove_vector_items(material[1], remove_array)
+        end
+    end
+    return work_str
+end
+
 add_entity_pops = lambda{ |entity_idx, race_idx, opts|
     entity_str = ""
     entity = df.world.entities.all[entity_idx]
@@ -730,6 +1067,8 @@ add_entity_pops = lambda{ |entity_idx, race_idx, opts|
             animals.minion_castes.insert_at(0, caste_idx)
         end
     end
+    sell_prices, sell_requests = get_sell_prices(entity_idx) # will be nil,nil for non-civ entities
+    entity_str += add_resources_entity(entity_idx, race_idx, sell_prices, sell_requests, opts)
     return entity_str
 }
 
@@ -772,12 +1111,13 @@ remove_site_pops = lambda{ |site_idx, race_id, opts|
 }
 
 remove_entity_pops = lambda{ |entity_id, race_id, opts|
+    work_str = ""
     entity = df.world.entities.all[entity_id]
     resources = entity.resources
     animals = resources.animals
     # put together a 2d array of races, castes, and their string description for operating on
     pet_pairs = [
-                [animals.pet_races, animals.pet_castes, 'pets'],
+                [animals.pet_races, animals.pet_castes, 'pets'], # description word "pets" is used in a conditional below -- for this array entry only
                 [animals.wagon_races, animals.wagon_castes, 'wagons'],
                 [animals.pack_animal_races, animals.pack_animal_castes, 'pack animals'],
                 [animals.wagon_puller_races, animals.wagon_puller_castes, 'wagon pullers'],
@@ -787,7 +1127,7 @@ remove_entity_pops = lambda{ |entity_id, race_id, opts|
                 [animals.exotic_pet_races, animals.exotic_pet_castes, 'exotic pets'],
                 # These aren't in animals, so disabled for now
                 #[resources.fish_races, resources.fish_castes],
-                #[resources.egg_races, resources.egg_castes],
+                [resources.egg_races, resources.egg_castes],
                 ]
     found_races = []
     found_animals = []
@@ -814,46 +1154,74 @@ remove_entity_pops = lambda{ |entity_id, race_id, opts|
         next if not correct_site or not site_link.link_strength == 100
         found_animals.concat remove_site_pops[site_idx, race_id, opts]
     end
-    found_races.uniq!
-    found_animals.uniq!
+    # track the removed pet indexes here for removal from export agreements later
+    removed_pets = []
     # go through this entity's races and remove marked populations
     pet_pairs.each_with_index do |pet_types, idx|
         remove_indexes = []
         remove_races = []
         pet_types[0].each_with_index do |race_idx, idx|
+            raws = df.world.raws.creatures.all[race_idx]
             found_races.push(race_idx)
             # Skip adding back the race(s) we want to remove
-            next if not ( race_idx == race_id or ( opts[:all_vermin] and df.world.raws.creatures.all[race_idx].flags[:AnyVermin] ) )
+            next if not ( race_idx == race_id or ( opts[:all_vermin] and raws.flags[:AnyVermin] ) )
             remove_indexes.push(idx)
             remove_races.push(race_idx) if not remove_races.include? race_idx
         end
         # reverse the list of indexes to remove so that we're not addressing the wrong ones after removing the first from the array
-        remove_indexes.reverse!
+        #remove_indexes.reverse!
         if remove_indexes.length > 0
-            display_str = "Removing %3d %13s from %s %d" % [remove_races.length, pet_types[2], entity.type.inspect, entity.id]
-            puts(display_str)
+            work_str += "Removing %3d %13s from %s %d" % [remove_races.length, pet_types[2], entity.type.inspect, entity.id]
         end
         next if opts[:display]
-        remove_indexes.each do |idx|
-            pet_types[0].delete_at(idx)
-            pet_types[1].delete_at(idx)
+        remove_vector_items(remove_indexes, [pet_types[0], pet_types[1]])
+        removed_pets = remove_indexes if pet_types[2] == "pets"
+    end
+    sell_prices, sell_requests = get_sell_prices(entity_id) # will be nil,nil for non-civ entities
+    if entity.type == :Civilization
+        if opts[:verbose]
+            found_races.sort!
+            found_races.uniq!
+            found_animals.sort!
+            found_animals.uniq!
+            civ_name = entity.name.to_s.gsub(/\w+/, &:capitalize)
+            work_str += "\nCivilization: %s (%d)\n" % [civ_name, entity_id]
+            no_populations = found_races.select{ |race| not found_animals.include? race }
+            no_populations.each do |race_idx|
+                animal_raws = df.world.raws.creatures.all[race_idx]
+                animal_name = animal_raws.name[1].gsub(/\w+/, &:capitalize)
+                work_str += "%33s (%26s) (no site pops)\n" % [animal_name, animal_raws.creature_id]
+            end
+        end
+        if not opts[:display]
+            if sell_prices
+                remove_vector_items(removed_pets, [ sell_prices[:Pets], sell_requests[:Pets] ])
+            elsif sell_requests
+                remove_vector_items(removed_pets, [ sell_requests[:Pets] ])
+            end
         end
     end
-    if entity.type == :Civilization and opts[:verbose]
-        found_races.uniq!
-        found_races.sort!
-        found_animals.uniq!
-        found_animals.sort!
-        civ_name = entity.name.to_s.gsub(/\w+/, &:capitalize)
-        puts("\nCivilization: %s (%d)\n" % [civ_name, entity_id])
-        no_populations = found_races.select{ |race| not found_animals.include? race }
-        no_populations.each do |race_idx|
-            animal_raws = df.world.raws.creatures.all[race_idx]
-            animal_name = animal_raws.name[1].gsub(/\w+/, &:capitalize)
-            puts("%33s (%26s) (no site pops)\n" % [animal_name, animal_raws.creature_id])
-        end
-    end
+    work_str += remove_entity_resources(entity_id, race_id, sell_prices, sell_requests, opts)
+    puts(work_str) if not work_str == ""
     return found_races, found_animals
+}
+
+# vector.insert_at only works for integers, so we have to do insertion on a proper array 
+# then assign the correctly aligned pointers from the array back to the vector
+# kinda kludgy, but it works
+pop_at_position = lambda{ |vector, insert_at, new_pop|
+    pops = []
+    # get all of the current populations in the vector
+    vector.each do |pop|; pops.push(pop); end
+    # allocate new position in vector
+    vector.push(new_pop)
+    # insert the new_population into our array
+    pops.insert(insert_at, new_pop)
+    # reassign the populations in the vector based on their position in the array
+    pops.each_with_index do |pop, idx|
+        vector[idx] = pop
+    end
+    # we don't return anything, as the vector is a memory object
 }
 
 add_site_pops = lambda{ |sites, pops, race_idx, opts|
@@ -867,7 +1235,9 @@ add_site_pops = lambda{ |sites, pops, race_idx, opts|
         civs.push(site.civ_id) if not civs.include? site.civ_id
         next if opts[:display]
         new_site_pop = world_population_alloc(:Animal, race_idx, new_amount, 10000001, site.cur_owner_id)
-        site.animals.push(new_site_pop)
+        #site.animals.insert_at(0, new_site_pop) # doesn't work
+        # push the new_site_pop to position zero in the vector.
+        pop_at_position[site.animals, 0, new_site_pop]
         pops[site_idx] = new_site_pop
      end
      # update the parent civilization with the new pets, if they aren't already in there
