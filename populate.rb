@@ -6,14 +6,20 @@ populate -s CREATURE ( [-r #] [-l #] [-e] [-n] [-b #] [-i #] [-x #] [-f] ) ( [-t
 =end
 
 # Below assumes that the path to the current script file is Dwarf Fortress=>hack=>scripts
-file_dir = File.dirname(__dir__)
-ruby_dir = file_dir + File::SEPARATOR + 'ruby'
+file_dir = File.expand_path(File.dirname(__FILE__))
+df_dir = Dir.pwd
+ruby_dir = df_dir + File::SEPARATOR + 'hack' + File::SEPARATOR + 'ruby'
 $LOAD_PATH.unshift(file_dir) unless $LOAD_PATH.include?(file_dir)
 $LOAD_PATH.unshift(ruby_dir) unless $LOAD_PATH.include?(ruby_dir)
 
 require 'optparse'
 
 options = {}
+
+if not df.world.world_data
+    p "ERROR: World not loaded."
+    exit
+end
 
 $script_args << '-h' if $script_args.empty?
 
@@ -191,16 +197,33 @@ width = world_data.world_width
 height = world_data.world_height
 
 fort_id = df.ui.site_id
-fortress_site = world_data.sites[fort_id - 1] # site_id is off by one as array addressing starts at zero, while site.id starts at one
-fortress_location = nil
+options[:fortress_site] = world_data.sites[fort_id - 1] # site_id is off by one as array addressing starts at zero, while site.id starts at one
+options[:fortress_location] = nil
 # Should never be needed, but just in case the off by one is changed
-if not fortress_site or ( fortress_site and fortress_site.id != fort_id )
+if not options[:fortress_site] or ( options[:fortress_site] and options[:fortress_site].id != fort_id )
     world_data.sites.each_with_index do |site, idx|
         if site.id == fort_id
-            fortress_site = site
+            options[:fortress_site] = site
             break
         end
     end
+end
+
+def make_2d(first_array=[], second_array=[])
+    return if not first_array.length == second_array.length
+    return_array = []
+    first_array.each_with_index do |value, idx|
+        return_array.push([value, second_array[idx]])
+    end
+    return return_array
+end
+
+def get_creature_info(creature_idx=-1)
+    creature_raws = df.world.raws.creatures.all[creature_idx]
+    creature_min = creature_raws.population_number[1]
+    creature_max = creature_raws.population_number[0]
+    creature_name = creature_raws.name[1].gsub(/\w+/, &:capitalize)
+    return creature_raws, creature_name, creature_min, creature_max
 end
 
 # Put two arrays together as a 2D array and test if a set of values is contained within
@@ -211,12 +234,12 @@ end
 # test_collection.include? [1, 2] => false
 # test_collection.include? 0 => false
 # test_collection.include? [ [0], 2 ] => false
-two_includes = lambda{ |first_array, second_array, value_one, value_two|
-    test_collection = first_array.collect.with_index {|x, i| [x, second_array[i]]}
+def two_includes(first_array, second_array, value_one, value_two)
+    test_collection = make_2d(first_array, second_array)
     return test_collection.include? [value_one, value_two]
-}
+end
 
-surroundings = lambda{ |evilness, savagery|
+def surroundings(evilness=-1, savagery=-1)
     flags = {}
     good = evilness <= 32 ? true : false
     evil = evilness >= 67 ? true : false
@@ -246,10 +269,10 @@ surroundings = lambda{ |evilness, savagery|
         description ||= ( savage ) ? 'Terrifying' : false
     end
     return flags, description
-}
+end
 
 # Get the biome type(s) and description for this location
-region_type = lambda{ |rainfall, drainage, elevation, temperature, salinity, biome_type, has_river|
+def region_type(rainfall=-1, drainage=-1, elevation=-1, temperature=-1, salinity=-1, biome_type=nil, has_river=false)
     # Remove the symbol decorator from the biome type symbol
     type_name = biome_type.inspect.sub(':', '')
 
@@ -348,16 +371,17 @@ region_type = lambda{ |rainfall, drainage, elevation, temperature, salinity, bio
     end
     final_out = ( not ( ( ocean and elevation <= 95 ) or ( biome_type == :Mountains and elevation >= 200 ) or ( desert and not has_river ) or biome_type == :Glacier or lake or swamp ) ) ? '%s [%9s]' % [description, type_name] : '[%9s]' % [type_name]
     return biome_flags, final_out
-}
+end
 
 # Check to see if a creature's raws will allow it to inhabit this location's biome
-can_habitate = lambda{ |creature_raw, surround_flags, biome_flags|
+def can_habitate(creature_idx=-1, surround_flags=nil, biome_flags=nil, opts={})
     alignment = true
     alignment_match = nil
     biome = false
     biome_match = nil
     surr_flags = []
     bio_flags = []
+    creature_raw = df.world.raws.creatures.all[creature_idx]
     # Alignment flags are exclusionary, if one is set then it must be matched.
     # However, it is not a requirement to have an alignment.  
     # So, we exclude locations where the creature's required alignment is not present.
@@ -376,14 +400,14 @@ can_habitate = lambda{ |creature_raw, surround_flags, biome_flags|
             biome = true
             biome_match = key
             # Only one biome match is needed for habitation
-            break if not options[:verbose]
+            break if not opts[:verbose]
         end
         if bio
             bio_flags.push(key)
         end
     end
     return alignment, biome, alignment_match, biome_match, surr_flags, bio_flags
-}
+end
 
 # Despite the name, this population tracker is tied to a df.world.world_data.regions entry. Thus it's not a global population, but a population tied to a region
 def world_population_alloc(type, race_idx, min=1, max=1, owner=-1)
@@ -468,14 +492,15 @@ def material_by_id(mat=-1, matidx=-1)
 end
 
 # Check for existing local populations so that we are not adding duplicates
-get_local = lambda{ |race_index, world_width, world_height, opts|
+def get_local(creature_idx=-1, world_width=-1, world_height=-1, opts={})
     incremented = 0
     located = 0
+    creature_raws, creature_name, creature_min, creature_max = get_creature_info(creature_idx)
 
     # Track the matching local populations by x,y coordinates
     local_pops = Array.new(world_width) { Array.new(world_height) }
     df.world.populations.each_with_index do |local_pop, index|
-        next if not local_pop.race == race_index
+        next if not local_pop.race == creature_idx
         located += 1
         x = local_pop.population.region_x
         y = local_pop.population.region_y
@@ -502,15 +527,16 @@ get_local = lambda{ |race_index, world_width, world_height, opts|
     end
     puts('%d local population(s) modified.' % [incremented]) if incremented > 0
     return local_pops, located
-}
+end
 
-get_region = lambda{ |data_world, race_index, opts|
+def get_region(creature_idx=-1, opts={})
     boosted = 0
     world_pops = {}
+    creature_raws, creature_name, creature_min, creature_max = get_creature_info(creature_idx)
     # Check for existing regional populations so that we are not adding duplicates
-    data_world.regions.each_with_index do |region, reg_idx|
+    df.world.world_data.regions.each_with_index do |region, reg_idx|
         region.population.each_with_index do |reg_pop, pop_idx|
-            if reg_pop.race == race_index
+            if reg_pop.race == creature_idx
                 world_pops[reg_idx] = [pop_idx, reg_pop]
                 if opts[:boost]
                     min = reg_pop.count_min
@@ -528,9 +554,9 @@ get_region = lambda{ |data_world, race_index, opts|
     end
     puts('%d region population(s) modified.' % [boosted]) if boosted > 0
     return world_pops
-}
+end
 
-get_site_desc = lambda{ |site|
+def get_site_desc(site)
     site_type = site.type.inspect.sub(':', '')
     civ_id = site.civ_id
     civ = df.world.entities.all[civ_id]
@@ -544,15 +570,15 @@ get_site_desc = lambda{ |site|
     ent_race_name = ent_race.name[1].gsub(/\w+/, &:capitalize)
     site_description = "\n[%s: %s (%d)]\n  Owner: %s (%d, %s)\n  Civilization: %s (%d)\n" % [site_type, site_name, site.id, ent_name, owner_id, ent_race_name, civ_name, civ_id]
     return site_description
-}
+end
 
-get_sites = lambda{ |data_world, race_idx, opts|
+def get_sites(race_idx=-1, opts={})
     available = {}
     site_pops = {}
     civs_found = []
     # Ruby doesn't have a boolean class, so this is the most readable way to test if an option is boolean or some other type
     is_boolean = [true, false]
-    data_world.sites.each_with_index do |site, site_idx|
+    df.world.world_data.sites.each_with_index do |site, site_idx|
         # Skip sites where no animals currently reside
         # I don't believe that it is safe to add animal entries if there aren't any already there
         next if site.animals.length == 0
@@ -567,7 +593,7 @@ get_sites = lambda{ |data_world, race_idx, opts|
         # Skip sites where the civilization's starting race does not match the user selected race
         # Golbin civilizations where the Goblins are all dead, but their former slaves live on will still be marked as GOBLIN
         next if opts[:civ_race] and not opts[:civ_race] == df.world.entities.all[site.cur_owner_id].race
-        display_str = get_site_desc[site]
+        display_str = get_site_desc(site)
         found_match = false
         site.animals.each_with_index do |animal, animal_idx|
             animal_raws = df.world.raws.creatures.all[animal.race]
@@ -578,7 +604,7 @@ get_sites = lambda{ |data_world, race_idx, opts|
             # animal.count_max is always 10000001 (infinite) for site populations
             #pop_max = animal.count_max
             animal_str = "%33s (%26s): %7d\n" % [animal_name, animal_id, pop_min]
-            if animal.race == race_idx or (options[:all_vermin] and animal_raws.flags[:AnyVermin])
+            if animal.race == race_idx or (opts[:all_vermin] and animal_raws.flags[:AnyVermin])
                 site_pops[site_idx] = animal
                 found_match = true
                 civs_found.push(site.civ_id) if not civs_found.include? site.civ_id
@@ -591,28 +617,28 @@ get_sites = lambda{ |data_world, race_idx, opts|
         puts(display_str) if found_match or opts[:verbose]
     end
     return available, site_pops, civs_found
-}
+end
 
-check_location = lambda{ |data_world, creature_raw, x, y, sorted_regions, local_pops, populatable, count, filtered_sites, opts|
+def check_location(creature_idx, x, y, sorted_regions, local_pops, populatable, count, filtered_sites, opts)
     # Get the region map for this location
-    location = data_world.region_map[x][y]
+    location = df.world.world_data.region_map[x][y]
     region_id = location.region_id
     # Get the region itself for this location
-    world_region = data_world.regions[region_id]
+    world_region = df.world.world_data.regions[region_id]
     # Check the surroundings
-    surround_flags, surround_description = surroundings[location.evilness, location.savagery]
+    surround_flags, surround_description = surroundings(location.evilness, location.savagery)
     # Check the biome
     has_river = location.flags[0]
     has_site = location.flags[3]
     site_type_match = false
-    biome_flags, biome_description = region_type[location.rainfall, location.drainage, location.elevation, location.temperature, location.salinity, world_region.type, has_river]
+    biome_flags, biome_description = region_type(location.rainfall, location.drainage, location.elevation, location.temperature, location.salinity, world_region.type, has_river)
     # Check if the creature can habitate here given the surroundings and biome
-    alignment, biome, alignment_match, biome_match, surr_flags, bio_flags = can_habitate[creature_raw, surround_flags, biome_flags]
+    alignment, biome, alignment_match, biome_match, surr_flags, bio_flags = can_habitate(creature_idx, surround_flags, biome_flags, opts)
     # Both must be true, or both must be false
     # (T&T) To use existing, the flag must be set, and there must be an established regional population.
     # (F&F) To not use existing, the flag must not be set, and there must be no existing regional population.
     use_existing = ( ( opts[:existing] and sorted_regions[region_id] ) or ( not opts[:existing] and not sorted_regions[region_id] ) )
-    location_info = {region: region_id, x: x, y: y, surr_desc: surround_description, biome_desc: biome_description, site: false, sites: false}
+    location_info = {:region => region_id, :x => x, :y => y, :surr_desc => surround_description, :biome_desc => biome_description, :site => false, :sites => false}
     if has_site
         location_info[:sites] = location.sites
         site_str = ''
@@ -627,8 +653,8 @@ check_location = lambda{ |data_world, creature_raw, x, y, sorted_regions, local_
     if opts[:verbose]
         puts("[%3d, %3d] Alignment match: %s; type: %s; Biome match: %s; type: %s;\n  Alignment: %s\n  Biomes: %s\n  Sites: %s\n" % [x, y, alignment, alignment_match, biome, biome_match, surr_flags.inspect, bio_flags.inspect, location_info[:site]])
     end
-    if opts[:fortress] and not local_pops[x][y] and x == fortress_site.pos.x and y == fortress_site.pos.y
-        fortress_location = location_info
+    if opts[:fortress] and not local_pops[x][y] and x == opts[:fortress_site].pos.x and y == opts[:fortress_site].pos.y
+        opts[:fortress_location] = location_info
         if not alignment
             puts('Warning: %s despise the %s surroundings of your fort\'s location.' % [creature_name, surround_description])
         end
@@ -648,9 +674,9 @@ check_location = lambda{ |data_world, creature_raw, x, y, sorted_regions, local_
         end
     end
     return populatable, count, filtered_sites
-}
+end
 
-get_available_regions = lambda{ |data_world, creature_raw, sorted_regions, local_pops, world_width, world_height, opts|
+def get_available_regions(creature_idx, sorted_regions, local_pops, world_width, world_height, opts={})
     available = {}
 
     min_x = 0
@@ -666,22 +692,23 @@ get_available_regions = lambda{ |data_world, creature_raw, sorted_regions, local
     # Go through each location and check it's biome for if the selected creature can habitate that location
     x_range.each do |x|
         y_range.each do |y|
-            available, count, sites_filtered = check_location[data_world, creature_raw, x, y, sorted_regions, local_pops, available, count, sites_filtered, opts]
+            available, count, sites_filtered = check_location(creature_idx, x, y, sorted_regions, local_pops, available, count, sites_filtered, opts)
         end
     end
     return available, count, sites_filtered
-}
+end
 
-add_region_pops = lambda{ |data_world, populatable, sorted_regions, count_location, sites_filtered, opts|
+def add_region_pops(creature_idx, populatable, sorted_regions, count_location, sites_filtered, opts={})
     # Get the list of regions
     region_keys = populatable.keys
     # Sort the region list by number of habitable locations contained within each region
-    region_keys.sort_by!{ |key| populatable[key].length }
+    region_keys.sort!{ |a,b| populatable[a].length <=> populatable[b].length }
     # Reverse the sort, so that the most habitable regions are at the begining of the list, rather than the end
     region_keys.reverse!
     # Remove regions past the maximum allowed amount.  This will remove the regions with the least number of habitable locations.
     # -- doesn't delete them from the actual table, just our key map
-    region_keys.slice!(opts[:regions]..65536)
+    max_cut = opts[:regions] + region_keys.length + 1
+    region_keys.slice!(opts[:regions]..max_cut)
     # Take the locations in all of the remaining regions, and put them into a flat/one dimensional list
     flat_locations = []
     region_keys.each do |key|
@@ -691,17 +718,19 @@ add_region_pops = lambda{ |data_world, populatable, sorted_regions, count_locati
     end
     # Randomly sort the list of locations
     flat_locations.shuffle!
+    max_cut = opts[:locations] + flat_locations.length + 1
     # Remove locations past the maximum allowed amount (65 default, or what was selected by the user)
-    flat_locations.slice!(opts[:locations]..65536)
-    if fortress_location
+    flat_locations.slice!(opts[:locations]..max_cut)
+    if opts[:fortress_location]
         if flat_locations.length >= opts[:locations]
             flat_locations.pop()
         end
-        flat_locations.push(fortress_location)
+        flat_locations.push(opts[:fortress_location])
     end
     # Sorts the remaining locations by multiplying their x,y values.  This effectively groups most of the locations by region too.
-    flat_locations.sort_by!{ |loc| loc[:x] * loc[:y] }
+    flat_locations.sort!{ |a,b| (a[:x] * a[:y]) <=> (b[:x] * b[:y]) }
     exist_desc = ( opts[:existing] ) ? 'existing' : 'new'
+    creature_raws, creature_name, creature_min, creature_max = get_creature_info(creature_idx)
     location_str = "%s can live in %d %s region(s), which contain %d new location(s) that are available for habitation.\nFilters limit future habitation to %d region(s) within which %d location(s) can be inhabited." % [creature_name, populatable.length, exist_desc, count_location, region_keys.length, flat_locations.length, sites_filtered]
     location_str += "\n Of the potential locations for habitation, %d lost consideration for lack of a [matching] site." % [sites_filtered] if sites_filtered > 0
     work_str = "\n"
@@ -712,7 +741,7 @@ add_region_pops = lambda{ |data_world, populatable, sorted_regions, count_locati
             location_str += "; Sites: %s" % [location[:site].gsub(/, $/, '')]
         end
         region_id = location[:region]
-        world_region = data_world.regions[region_id]
+        world_region = df.world.world_data.regions[region_id]
         region_populations = world_region.population
         if not sorted_regions[region_id]
             work_str += "[RegionID: %d] New region population added.\n" % [region_id]
@@ -726,14 +755,14 @@ add_region_pops = lambda{ |data_world, populatable, sorted_regions, count_locati
         elsif not opts[:display]
             pop_idx = sorted_regions[region_id][0]
         end
-        new_amount = rand(creature_min..creature_max)
+        new_amount = (creature_min..creature_max).to_a.shuffle[0]
         work_str += "[%3d, %3d] New local population of %d %s added.\n" % [location[:x], location[:y], new_amount, creature_name]
         next if opts[:display]
         new_local_pop = local_population_alloc(:Animal, creature_idx, new_amount, location[:x], location[:y], pop_idx)
         df.world.populations.push(new_local_pop)
     end
     puts(location_str + work_str)
-}
+end
 
 def get_empty_prices()
     return_hash = {}
@@ -783,7 +812,7 @@ def remove_vector_items(indexes=[], vectors=[])
     end
 end
 
-def add_material_by_type(creature_idx=-1, material_idx=-1, materials)
+def add_material_by_type(creature_idx=-1, material_idx=-1, materials=nil)
     return materials if creature_idx == -1 or material_idx == -1
     creature_raws = df.world.raws.creatures.all[creature_idx]
     # I don't know why materials indexes are off by 19 right now, but they are
@@ -818,23 +847,23 @@ end
 def get_creature_harvestables(creature_idx=-1)
     creature_raws = df.world.raws.creatures.all[creature_idx]
     materials = {
-                 Leather:   [],
-                 Silk:      [],
-                 Wool:      [],
-                 Bone:      [],
-                 Shell:     [],
-                 Pearl:     [],
-                 Ivory:     [],
-                 Horn:      [],
-                 Crafts:    [],
-                 Flasks:    [],
-                 Quivers:   [],
-                 Backpacks: [],
-                 Cheese:    [],
-                 Extracts:  [],
-                 Meat:      [],
-                 Eggs:      [],
-                 Parchment: [],
+                 :Leather =>   [],
+                 :Silk =>      [],
+                 :Wool =>      [],
+                 :Bone =>      [],
+                 :Shell =>     [],
+                 :Pearl =>     [],
+                 :Ivory =>     [],
+                 :Horn =>      [],
+                 :Crafts =>    [],
+                 :Flasks =>    [],
+                 :Quivers =>   [],
+                 :Backpacks => [],
+                 :Cheese =>    [],
+                 :Extracts =>  [],
+                 :Meat =>      [],
+                 :Eggs =>      [],
+                 :Parchment => [],
                 }
     creature_raws.caste.each do |caste|
         misc = caste.misc
@@ -874,7 +903,7 @@ def get_creature_harvestables(creature_idx=-1)
     return materials
 end
 
-def add_resources_entity(entity_idx=-1, creature_idx=-1, sell_prices, sell_requests, opts)
+def add_resources_entity(entity_idx=-1, creature_idx=-1, sell_prices=nil, sell_requests=nil, opts={})
     harvestables = get_creature_harvestables(creature_idx)
     # Emulate a sell_prices/sell_requests list if none is returned to simplify code later
     sell_prices = get_empty_prices() if not sell_prices
@@ -888,37 +917,35 @@ def add_resources_entity(entity_idx=-1, creature_idx=-1, sell_prices, sell_reque
     misc_mat = resources.misc_mat
     work_str = ""
     # create a hash table of materials to check for addition
-    materials = {Leather:   [organic.leather,    [ [ sell_prices[:Leather],       sell_requests[:Leather] ],  
+    materials = {:Leather =>   [organic.leather,    [ [ sell_prices[:Leather],       sell_requests[:Leather] ],  
                                                    [ sell_prices[:BagsLeather],   sell_requests[:BagsLeather] ] ] ], # direct leather mappings
-                 Silk:      [organic.silk,       [ [ sell_prices[:ClothSilk],     sell_requests[:ClothSilk] ],
+                 :Silk =>      [organic.silk,       [ [ sell_prices[:ClothSilk],     sell_requests[:ClothSilk] ],
                                                    [ sell_prices[:BagsSilk],      sell_requests[:BagsSilk] ],
                                                    [ sell_prices[:ThreadSilk],    sell_requests[:ThreadSilk] ],
                                                    [ sell_prices[:RopesSilk],     sell_requests[:RopesSilk] ] ] ], # direct silk mappings
-                 Wool:      [organic.wool,       [ [ sell_prices[:BagsYarn],      sell_requests[:BagsYarn] ],
+                 :Wool =>      [organic.wool,       [ [ sell_prices[:BagsYarn],      sell_requests[:BagsYarn] ],
                                                    [ sell_prices[:RopesYarn],     sell_requests[:RopesYarn] ],
                                                    [ sell_prices[:ClothYarn],     sell_requests[:ClothYarn] ],
                                                    [ sell_prices[:ThreadYarn],    sell_requests[:ThreadYarn] ] ] ], # direct yarn mappings
-                 Parchment: [organic.anon_1,     [ [ sell_prices[62],             sell_requests[62] ] ] ], # Parchment isn't recognized in DFHack yet, so this will need updating
-                 Bone:      [refuse.bone,        [] ], # no direct bone mappings
-                 Shell:     [refuse.shell,       [] ], # no direct shell mappings
-                 Pearl:     [refuse.pearl,       [] ], # no direct pearl mappings
-                 Ivory:     [refuse.ivory,       [] ], # no direct ivory mappings :: tusks, and teeth
-                 Horn:      [refuse.horn,        [] ], # no direct horn mappings  :: hoofs too
+                 :Parchment => [organic.anon_1,     [ [ sell_prices[62],             sell_requests[62] ] ] ], # Parchment isn't recognized in DFHack yet, so this will need updating
+                 :Bone =>      [refuse.bone,        [] ], # no direct bone mappings
+                 :Shell =>     [refuse.shell,       [] ], # no direct shell mappings
+                 :Pearl =>     [refuse.pearl,       [] ], # no direct pearl mappings
+                 :Ivory =>     [refuse.ivory,       [] ], # no direct ivory mappings :: tusks, and teeth
+                 :Horn =>      [refuse.horn,        [] ], # no direct horn mappings  :: hoofs too
                  # direct craft mappings :: metal, stone, gem, bone, etc...
-                 Crafts:    [misc_mat.crafts,    [ [ sell_prices[:Crafts],        sell_requests[:Crafts] ] ] ], 
+                 :Crafts =>    [misc_mat.crafts,    [ [ sell_prices[:Crafts],        sell_requests[:Crafts] ] ] ], 
                  # direct mappings from flasks to :FlasksWaterskins :: metal flasks and leather waterskins
-                 Flasks:    [misc_mat.flasks,    [ [ sell_prices[:FlasksWaterskins], 
+                 :Flasks =>    [misc_mat.flasks,    [ [ sell_prices[:FlasksWaterskins], 
                                                        sell_requests[:FlasksWaterskins] ] ] ], 
                  # Quivers and Backpacks are NOT included with Leather as their values are NOT mapped directly to Leather's
-                 Quivers:   [misc_mat.quivers,   [ [ sell_prices[:Quivers],       sell_requests[:Quivers] ] ] ], # leather
-                 Backpacks: [misc_mat.backpacks, [ [ sell_prices[:Backpacks],     sell_requests[:Backpacks] ] ] ], # leather
-                 Cheese:    [misc_mat.cheese,    [ [ sell_prices[:Cheese],        sell_requests[:Cheese] ] ] ],
+                 :Quivers =>   [misc_mat.quivers,   [ [ sell_prices[:Quivers],       sell_requests[:Quivers] ] ] ], # leather
+                 :Backpacks => [misc_mat.backpacks, [ [ sell_prices[:Backpacks],     sell_requests[:Backpacks] ] ] ], # leather
+                 :Cheese =>    [misc_mat.cheese,    [ [ sell_prices[:Cheese],        sell_requests[:Cheese] ] ] ],
                  # direct extracts mappings :: milk, venom, blood, sweat, etc...
-                 Extracts:  [misc_mat.extracts,  [ [ sell_prices[:Extracts],      sell_requests[:Extracts] ] ] ], 
+                 :Extracts =>  [misc_mat.extracts,  [ [ sell_prices[:Extracts],      sell_requests[:Extracts] ] ] ], 
                  # direct meat mappings :: muscle, brain, liver, pancreas, etc...
-                 Meat:      [misc_mat.meat,      [ [ sell_prices[:Meat],          sell_requests[:Meat] ] ] ], 
-                 # Unknown where sheet/parchment is held in memory at this time
-                 #Sheet:     [,      []], # skin => parchment
+                 :Meat =>      [misc_mat.meat,      [ [ sell_prices[:Meat],          sell_requests[:Meat] ] ] ], 
                  }
     # go through each material and check for matching additions using the harvestables table
     materials.each do |key, material|
@@ -928,7 +955,7 @@ def add_resources_entity(entity_idx=-1, creature_idx=-1, sell_prices, sell_reque
         mat_index = material[0].mat_index.to_a
         mat_type = material[0].mat_type.to_a
         # create a 2d array of each vectors values to test if the harvestable is already present
-        mats = mat_index.collect.with_index {|x, i| [x, mat_type[i]]}
+        mats = make_2d(mat_index, mat_type)
         harvestables[key].each do |harvestable|
             next if mats.include? harvestable
             addable.push(harvestable) if not addable.include? harvestable
@@ -956,7 +983,7 @@ def add_resources_entity(entity_idx=-1, creature_idx=-1, sell_prices, sell_reque
     return work_str
 end
 
-def remove_entity_resources(entity_idx=-1, creature_idx=-1, sell_prices, sell_requests, opts)
+def remove_entity_resources(entity_idx=-1, creature_idx=-1, sell_prices=nil, sell_requests=nil, opts={})
     work_str = ""
     # Emulate a sell_prices/sell_requests list if none is returned to simplify code later
     sell_prices = get_empty_prices() if not sell_prices
@@ -971,37 +998,35 @@ def remove_entity_resources(entity_idx=-1, creature_idx=-1, sell_prices, sell_re
     # get creature by index
     creature_raws = df.world.raws.creatures.all[creature_idx]
     # create a hash table of materials to check for removal
-    materials = {Leather:   [organic.leather,    [], [ sell_prices[:Leather],       sell_requests[:Leather],  
+    materials = {:Leather =>   [organic.leather,    [], [ sell_prices[:Leather],       sell_requests[:Leather],  
                                                        sell_prices[:BagsLeather],   sell_requests[:BagsLeather] ] ], # direct leather mappings
-                 Silk:      [organic.silk,       [], [ sell_prices[:ClothSilk],     sell_requests[:ClothSilk],
+                 :Silk =>      [organic.silk,       [], [ sell_prices[:ClothSilk],     sell_requests[:ClothSilk],
                                                        sell_prices[:BagsSilk],      sell_requests[:BagsSilk], 
                                                        sell_prices[:ThreadSilk],    sell_requests[:ThreadSilk], 
                                                        sell_prices[:RopesSilk],     sell_requests[:RopesSilk] ] ], # direct silk mappings
-                 Wool:      [organic.wool,       [], [ sell_prices[:BagsYarn],      sell_requests[:BagsYarn],
+                 :Wool =>      [organic.wool,       [], [ sell_prices[:BagsYarn],      sell_requests[:BagsYarn],
                                                        sell_prices[:RopesYarn],     sell_requests[:RopesYarn], 
                                                        sell_prices[:ClothYarn],     sell_requests[:ClothYarn], 
                                                        sell_prices[:ThreadYarn],    sell_requests[:ThreadYarn] ] ], # direct yarn mappings
-                 Parchment: [organic.anon_1,     [], [ sell_prices[62],             sell_requests[62] ] ], # Parchment isn't recognized in DFHack yet, so this will need updating
-                 Bone:      [refuse.bone,        [], [] ], # no direct bone mappings
-                 Shell:     [refuse.shell,       [], [] ], # no direct shell mappings
-                 Pearl:     [refuse.pearl,       [], [] ], # no direct pearl mappings
-                 Ivory:     [refuse.ivory,       [], [] ], # no direct ivory mappings :: tusks, and teeth
-                 Horn:      [refuse.horn,        [], [] ], # no direct horn mappings  :: hoofs too
+                 :Parchment => [organic.anon_1,     [], [ sell_prices[62],             sell_requests[62] ] ], # Parchment isn't recognized in DFHack yet, so this will need updating
+                 :Bone =>      [refuse.bone,        [], [] ], # no direct bone mappings
+                 :Shell =>     [refuse.shell,       [], [] ], # no direct shell mappings
+                 :Pearl =>     [refuse.pearl,       [], [] ], # no direct pearl mappings
+                 :Ivory =>     [refuse.ivory,       [], [] ], # no direct ivory mappings :: tusks, and teeth
+                 :Horn =>      [refuse.horn,        [], [] ], # no direct horn mappings  :: hoofs too
                  # direct craft mappings :: metal, stone, gem, bone, etc...
-                 Crafts:    [misc_mat.crafts,    [], [ sell_prices[:Crafts],        sell_requests[:Crafts] ] ], 
+                 :Crafts =>    [misc_mat.crafts,    [], [ sell_prices[:Crafts],        sell_requests[:Crafts] ] ], 
                  # direct mappings from flasks to :FlasksWaterskins :: metal flasks and leather waterskins
-                 Flasks:    [misc_mat.flasks,    [], [ sell_prices[:FlasksWaterskins], 
+                 :Flasks =>    [misc_mat.flasks,    [], [ sell_prices[:FlasksWaterskins], 
                                                        sell_requests[:FlasksWaterskins] ] ], 
                  # Quivers and Backpacks are NOT included with Leather as their values are NOT mapped directly to Leather's
-                 Quivers:   [misc_mat.quivers,   [], [ sell_prices[:Quivers],       sell_requests[:Quivers] ] ], # leather
-                 Backpacks: [misc_mat.backpacks, [], [ sell_prices[:Backpacks],     sell_requests[:Backpacks] ] ], # leather
-                 Cheese:    [misc_mat.cheese,    [], [ sell_prices[:Cheese],        sell_requests[:Cheese] ] ],
+                 :Quivers =>   [misc_mat.quivers,   [], [ sell_prices[:Quivers],       sell_requests[:Quivers] ] ], # leather
+                 :Backpacks => [misc_mat.backpacks, [], [ sell_prices[:Backpacks],     sell_requests[:Backpacks] ] ], # leather
+                 :Cheese =>    [misc_mat.cheese,    [], [ sell_prices[:Cheese],        sell_requests[:Cheese] ] ],
                  # direct extracts mappings :: milk, venom, blood, sweat, etc...
-                 Extracts:  [misc_mat.extracts,  [], [ sell_prices[:Extracts],      sell_requests[:Extracts] ] ], 
+                 :Extracts =>  [misc_mat.extracts,  [], [ sell_prices[:Extracts],      sell_requests[:Extracts] ] ], 
                  # direct meat mappings :: muscle, brain, liver, pancreas, etc...
-                 Meat:      [misc_mat.meat,      [], [ sell_prices[:Meat],          sell_requests[:Meat] ]], 
-                 # Unknown where sheet/parchment is held in memory at this time
-                 #Sheet:     [,      []], # skin => parchment
+                 :Meat =>      [misc_mat.meat,      [], [ sell_prices[:Meat],          sell_requests[:Meat] ]], 
                  }
     # go through each material and check for entries using the creature index
     materials.each do |key, material|
@@ -1030,7 +1055,7 @@ def remove_entity_resources(entity_idx=-1, creature_idx=-1, sell_prices, sell_re
     return work_str
 end
 
-add_entity_pops = lambda{ |entity_idx, race_idx, opts|
+def add_entity_pops(entity_idx, race_idx, opts)
     entity_str = ""
     entity = df.world.entities.all[entity_idx]
     animals = entity.resources.animals
@@ -1038,14 +1063,14 @@ add_entity_pops = lambda{ |entity_idx, race_idx, opts|
     sell_prices, sell_requests = get_sell_prices(entity_idx) # will be nil,nil for non-civ entities
     race.caste.each_with_index do |caste, caste_idx|
         flags = caste.flags
-        pet = ( ( flags[:PET] or flags[:PET_EXOTIC] ) and not two_includes[animals.pet_races, animals.pet_castes, race_idx, caste_idx] )
+        pet = ( ( flags[:PET] or flags[:PET_EXOTIC] ) and not two_includes(animals.pet_races, animals.pet_castes, race_idx, caste_idx) )
         # Until the membership in the animals.exotic_pet_races is understood, no new creatures should be added to it.
         #pet_exotic = ( flags[:PET_EXOTIC] and not two_includes[animals.exotic_pet_races, animals.exotic_pet_castes, race_idx, caste_idx] )
-        pack_animal = ( flags[:PACK_ANIMAL] and not two_includes[animals.pack_animal_races, animals.pack_animal_castes, race_idx, caste_idx] )
-        wagon_puller = ( flags[:WAGON_PULLER] and not two_includes[animals.wagon_puller_races, animals.wagon_puller_castes, race_idx, caste_idx] )
-        mount = ( ( flags[:MOUNT] or flags[:MOUNT_EXOTIC] ) and not two_includes[animals.mount_races, animals.mount_castes, race_idx, caste_idx] )
-        minion = ( flags[:TRAINABLE_WAR] and not flags[:CAN_LEARN] and not two_includes[animals.minion_races, animals.minion_castes, race_idx, caste_idx] )
-        egg_layer = ( ( flags[:LAYS_EGGS] or flags[:LAYS_UNUSUAL_EGGS] ) and not two_includes[animals.minion_races, animals.minion_castes, race_idx, caste_idx] )
+        pack_animal = ( flags[:PACK_ANIMAL] and not two_includes(animals.pack_animal_races, animals.pack_animal_castes, race_idx, caste_idx) )
+        wagon_puller = ( flags[:WAGON_PULLER] and not two_includes(animals.wagon_puller_races, animals.wagon_puller_castes, race_idx, caste_idx) )
+        mount = ( ( flags[:MOUNT] or flags[:MOUNT_EXOTIC] ) and not two_includes(animals.mount_races, animals.mount_castes, race_idx, caste_idx) )
+        minion = ( flags[:TRAINABLE_WAR] and not flags[:CAN_LEARN] and not two_includes(animals.minion_races, animals.minion_castes, race_idx, caste_idx) )
+        egg_layer = ( ( flags[:LAYS_EGGS] or flags[:LAYS_UNUSUAL_EGGS] ) and not two_includes(animals.minion_races, animals.minion_castes, race_idx, caste_idx) )
         entity_str += "%20s: PET=%5s, PACK_ANIMAL=%5s, WAGON_PULLER=%5s, MOUNT=%5s, MINION=%5s\n" % [caste.caste_id, pet, pack_animal, wagon_puller, mount, minion]
         next if opts[:display]
         # Only creatures in the animals.pet_races array will be available for trade
@@ -1087,9 +1112,9 @@ add_entity_pops = lambda{ |entity_idx, race_idx, opts|
     end
     entity_str += add_resources_entity(entity_idx, race_idx, sell_prices, sell_requests, opts)
     return entity_str
-}
+end
 
-remove_site_pops = lambda{ |site_idx, race_id, opts|
+def remove_site_pops(site_idx, race_id, opts)
     site = df.world.world_data.sites[site_idx]
     # modifying a player fortress' populations this way is probably a bad idea, as spawned units are involved
     return if site.type == :PlayerFortress
@@ -1110,7 +1135,7 @@ remove_site_pops = lambda{ |site_idx, race_id, opts|
     # reverse the list of indexes to remove so that we're not addressing the wrong ones after removing the first from the array
     animals_remove.reverse!
     removed = animals_remove.length
-    display_str = get_site_desc[site]
+    display_str = get_site_desc(site)
     display_str += "    Removing %d population(s)" % [removed]
     puts(display_str)
     puts(animal_strings.join(''))
@@ -1125,9 +1150,9 @@ remove_site_pops = lambda{ |site_idx, race_id, opts|
         end
     end
     return found_animals
-}
+end
 
-remove_entity_pops = lambda{ |entity_id, race_id, opts|
+def remove_entity_pops(entity_id, race_id, opts)
     work_str = ""
     entity = df.world.entities.all[entity_id]
     resources = entity.resources
@@ -1153,7 +1178,7 @@ remove_entity_pops = lambda{ |entity_id, race_id, opts|
         # only work from the top down, not the bottom up.  lest we start an infinite loop
         # -- not sure what strength is for, but it was 100 from civ to site governments in my test case
         next if not child.type == :CHILD or not child.strength == 100
-        child_races, child_animals = remove_entity_pops[child.target, race_id, opts]
+        child_races, child_animals = remove_entity_pops(child.target, race_id, opts)
         if entity.type == :Civilization
             found_races.concat child_races
             found_animals.concat child_animals
@@ -1169,7 +1194,7 @@ remove_entity_pops = lambda{ |entity_id, race_id, opts|
         correct_site = ( flags.residence or flags.capital or flags.fortress or flags.land_for_holding or flags.central_holding_land or flags.land_holder_residence )
         # skip sites where a noble of this civ cannot reside (trading partners, monuments, sites of warring civs, etc)
         next if not correct_site or not site_link.link_strength == 100
-        found_animals.concat remove_site_pops[site_idx, race_id, opts]
+        found_animals.concat remove_site_pops(site_idx, race_id, opts)
     end
     # track the removed pet indexes here for removal from export agreements later
     removed_pets = []
@@ -1226,12 +1251,12 @@ remove_entity_pops = lambda{ |entity_id, race_id, opts|
     work_str += remove_entity_resources(entity_id, race_id, sell_prices, sell_requests, opts)
     puts(work_str) if not work_str == ""
     return found_races, found_animals
-}
+end
 
 # vector.insert_at only works for integers, so we have to do insertion on a proper array 
 # then assign the correctly aligned pointers from the array back to the vector
 # kinda kludgy, but it works
-pop_at_position = lambda{ |vector, insert_at, new_pop|
+def pop_at_position(vector, insert_at, new_pop)
     pops = []
     # get all of the current populations in the vector
     vector.each do |pop|; pops.push(pop); end
@@ -1244,39 +1269,42 @@ pop_at_position = lambda{ |vector, insert_at, new_pop|
         vector[idx] = pop
     end
     # we don't return anything, as the vector is a memory object
-}
+end
 
-add_site_pops = lambda{ |sites, pops, race_idx, opts|
+def add_site_pops(sites, pops, creature_idx, opts)
     work_str = ''
     civs = []
+    creature_raws, creature_name, creature_min, creature_max = get_creature_info(creature_idx)
     sites.each do |site_idx, site|
-        work_str += get_site_desc[site]
-        new_amount = rand(creature_min..creature_max)
-        work_str += "%33s (%26s): %7d (created)\n" % [creature_name, race_idx, new_amount]
-        work_str += add_entity_pops[site.cur_owner_id, race_idx, opts]
+        work_str += get_site_desc(site)
+        # Randomly select a new amount of creatures to add from the range of min and max values
+        new_amount = (creature_min..creature_max).to_a.shuffle[0]
+        work_str += "%33s (%26s): %7d (created)\n" % [creature_name, creature_idx, new_amount]
+        work_str += add_entity_pops(site.cur_owner_id, creature_idx, opts)
         civs.push(site.civ_id) if not civs.include? site.civ_id
         next if opts[:display]
-        new_site_pop = world_population_alloc(:Animal, race_idx, new_amount, 10000001, site.cur_owner_id)
+        new_site_pop = world_population_alloc(:Animal, creature_idx, new_amount, 10000001, site.cur_owner_id)
         #site.animals.insert_at(0, new_site_pop) # doesn't work with non integer entries
         # push the new_site_pop to position zero in the vector.
-        pop_at_position[site.animals, 0, new_site_pop]
+        pop_at_position(site.animals, 0, new_site_pop)
         pops[site_idx] = new_site_pop
      end
      # update the parent civilization with the new pets, if they aren't already in there
      # this is necessary for caravans to access the new animals if the animals are tradeable
      civs.each do |civ|
-        work_str += add_entity_pops[civ, race_idx, opts]
+        work_str += add_entity_pops(civ, creature_idx, opts)
      end
      work_str += "\nCreated a population at %d site(s)." % [sites.length]
      puts(work_str)
      return pops
-}
+end
 
-update_site_pops = lambda{ |data_world, pops, exact=false, amount=0, opts|
+def update_site_pops(creature_idx=-1, pops=nil, exact=false, amount=0, opts={})
     work_str = ''
+    creature_raws, creature_name, creature_min, creature_max = get_creature_info(creature_idx)
     pops.each do |site_idx, animal|
-        site = data_world.sites[site_idx]
-        work_str += get_site_desc[site]
+        site = df.world.world_data.sites[site_idx]
+        work_str += get_site_desc(site)
         old_amount = animal.count_min
         new_amount = amount
         if not exact
@@ -1287,36 +1315,41 @@ update_site_pops = lambda{ |data_world, pops, exact=false, amount=0, opts|
     end
     work_str += "Modified a population at %d site(s)." % [pops.length]
     puts(work_str)
-}
+end
+
+start_time = Time.new
 
 if options[:site_id] or options[:civ_id] or options[:civ_race]
-    available_sites, matching_sites, found_civs = get_sites[world_data, creature_idx, options]
+    available_sites, matching_sites, found_civs = get_sites(creature_idx, options)
     found_civs.push(options[:civ_id]) if options[:civ_id] and not found_civs.include? options[:civ_id]
     info_str = "Found %d site(s) with an existing population.\nFound %d site(s) where a population can be added." % [matching_sites.length, available_sites.length]
     puts(info_str)
     if options[:add_race]
-        matching_sites = add_site_pops[available_sites, matching_sites, creature_idx, options]
+        matching_sites = add_site_pops(available_sites, matching_sites, creature_idx, options)
     end
     if options[:set_amount] > 0
-        update_site_pops[world_data, matching_sites, true, options[:set_amount], options]
+        update_site_pops(creature_idx, matching_sites, true, options[:set_amount], options)
     end
     if options[:add_amount] > 0
-        update_site_pops[world_data, matching_sites, false, options[:add_amount], options]
+        update_site_pops(creature_idx, matching_sites, false, options[:add_amount], options)
     end
     if options[:remove_animal] or options[:all_vermin]
         found_civs.each do |civ_id|
-            remove_entity_pops[civ_id, creature_idx, options]
+            remove_entity_pops(civ_id, creature_idx, options)
         end
     end
 end
 if options[:regions] > 0 or options[:locations] > 0 or options[:boost] or options[:increment]
-    local_populations, found = get_local[creature_idx, width, height, options]
-    world_pop_by_region = get_region[world_data, creature_idx, options]
+    local_populations, found = get_local(creature_idx, width, height, options)
+    p 'get_local %2f' % [(start_time - Time.new)] if options[:verbose]
+    world_pop_by_region = get_region(creature_idx, options)
+    p 'get_region %2f' % [(start_time - Time.new)] if options[:verbose]
 end
 if options[:regions] > 0 or options[:locations] > 0
     region_count = world_pop_by_region.length
-    available_regions, locations_count, filtered_sites = get_available_regions[world_data, creature, world_pop_by_region, local_populations, width, height, options]
+    available_regions, locations_count, filtered_sites = get_available_regions(creature_idx, world_pop_by_region, local_populations, width, height, options)
+    p 'get_available_regions %2f' % [(start_time - Time.new)] if options[:verbose]
     found_str = ( found == 0 and region_count == 0 ) ? "%s exist nowhere in this world, at this time." % [creature_name] : "%s have been found already living in %d region(s), which contain %d location(s) that have active populations." % [creature_name, region_count, found]
     puts(found_str)
-    add_region_pops[world_data, available_regions, world_pop_by_region, locations_count, filtered_sites, options]
+    add_region_pops(creature_idx, available_regions, world_pop_by_region, locations_count, filtered_sites, options)
 end
