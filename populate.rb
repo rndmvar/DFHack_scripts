@@ -740,6 +740,7 @@ def get_empty_prices()
     DFHack::EntitySellCategory::ENUM.values.each do |key|
         return_hash[key] = []
     end
+    return_hash[62] = [] # parchment temporary support
     return return_hash
 end
 
@@ -747,11 +748,13 @@ def get_sell_prices(civ_idx=-1)
     civ = df.world.entities.all[civ_idx]
     sell_prices = nil
     sell_requests = nil
+    # If the diplomat is off map, then the civilization will hold the only copy of the trade agreement
     civ.meeting_events.each do |meeting|
         next if not meeting.sell_prices
         sell_prices = meeting.sell_prices.price
         sell_requests = meeting.sell_prices.items.priority
     end
+    # If the diplomat is on the map, and not dead, they will hold the only copy of the trade agreement
     df.ui.dip_meeting_info.each do |meeting|
         next if not meeting.civ_id == civ.id
         # For that brief point in time where the diplomat has entered the map, but not met with the noble to discuss exports/imports
@@ -762,6 +765,7 @@ def get_sell_prices(civ_idx=-1)
             sell_requests = event.sell_prices.items.priority
         end
     end
+    # If the diplomat is dead, or there is no trade agreement, the return values will be nil, nil
     return sell_prices, sell_requests
 end
 
@@ -788,6 +792,7 @@ def add_material_by_type(creature_idx=-1, material_idx=-1, materials)
     flags = material.flags
     new_mat = [creature_idx, material_idx]
     materials[:Leather].push(new_mat) if flags[:LEATHER] and not materials[:Leather].include? new_mat
+    materials[:Parchment].push(new_mat) if material.reaction_class.include? "PARCHMENT" and not materials[:Parchment].include? new_mat
     materials[:Silk].push(new_mat) if flags[:SILK] and not materials[:Silk].include? new_mat
     materials[:Wool].push(new_mat) if flags[:YARN] and not materials[:Wool].include? new_mat
     materials[:Bone].push(new_mat) if flags[:BONE] and not materials[:Bone].include? new_mat
@@ -829,6 +834,7 @@ def get_creature_harvestables(creature_idx=-1)
                  Extracts:  [],
                  Meat:      [],
                  Eggs:      [],
+                 Parchment: [],
                 }
     creature_raws.caste.each do |caste|
         misc = caste.misc
@@ -892,6 +898,7 @@ def add_resources_entity(entity_idx=-1, creature_idx=-1, sell_prices, sell_reque
                                                    [ sell_prices[:RopesYarn],     sell_requests[:RopesYarn] ],
                                                    [ sell_prices[:ClothYarn],     sell_requests[:ClothYarn] ],
                                                    [ sell_prices[:ThreadYarn],    sell_requests[:ThreadYarn] ] ] ], # direct yarn mappings
+                 Parchment: [organic.anon_1,     [ [ sell_prices[62],             sell_requests[62] ] ] ], # Parchment isn't recognized in DFHack yet, so this will need updating
                  Bone:      [refuse.bone,        [] ], # no direct bone mappings
                  Shell:     [refuse.shell,       [] ], # no direct shell mappings
                  Pearl:     [refuse.pearl,       [] ], # no direct pearl mappings
@@ -974,6 +981,7 @@ def remove_entity_resources(entity_idx=-1, creature_idx=-1, sell_prices, sell_re
                                                        sell_prices[:RopesYarn],     sell_requests[:RopesYarn], 
                                                        sell_prices[:ClothYarn],     sell_requests[:ClothYarn], 
                                                        sell_prices[:ThreadYarn],    sell_requests[:ThreadYarn] ] ], # direct yarn mappings
+                 Parchment: [organic.anon_1,     [], [ sell_prices[62],             sell_requests[62] ] ], # Parchment isn't recognized in DFHack yet, so this will need updating
                  Bone:      [refuse.bone,        [], [] ], # no direct bone mappings
                  Shell:     [refuse.shell,       [], [] ], # no direct shell mappings
                  Pearl:     [refuse.pearl,       [], [] ], # no direct pearl mappings
@@ -1249,7 +1257,7 @@ add_site_pops = lambda{ |sites, pops, race_idx, opts|
         civs.push(site.civ_id) if not civs.include? site.civ_id
         next if opts[:display]
         new_site_pop = world_population_alloc(:Animal, race_idx, new_amount, 10000001, site.cur_owner_id)
-        #site.animals.insert_at(0, new_site_pop) # doesn't work
+        #site.animals.insert_at(0, new_site_pop) # doesn't work with non integer entries
         # push the new_site_pop to position zero in the vector.
         pop_at_position[site.animals, 0, new_site_pop]
         pops[site_idx] = new_site_pop
