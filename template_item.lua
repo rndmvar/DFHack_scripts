@@ -45,7 +45,10 @@ function templateitem(reaction,reaction_product,unit,input_items,input_reagents,
 	mat_count = mat_count - 1
 
 	-- determine the amount of material to consume
-	local material_size = template_item.subtype.material_size
+	local def = dfhack.items.getSubtypeDef(template_item:getType(), template_item:getSubtype())
+	local material_size = 1
+	-- items without a subtype (flasks) will not return a material size. 
+	if def then material_size = def.material_size end
 	-- http://dwarffortresswiki.org/index.php/40d:Material_size
 	-- http://dwarffortresswiki.org/index.php/DF2014:Melt_item#Yield
 	-- Using the community agreed upon standard of 0.3 units of raw material per 1 material size, and rounding up to 1 as a minimum amount
